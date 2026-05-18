@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+.openclaw-browser-profile/
+doc.md
+data
