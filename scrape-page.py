@@ -14,6 +14,8 @@ from scrapling.fetchers import StealthySession
 
 DEFAULT_OUTPUT_DIR = Path("data/openclaw")
 DEFAULT_RAW_DIR = Path("data/raw")
+MAX_BID_HISTORY = 10
+SHIPPING_METHOD_KEYWORDS = ["versand", "postversand", "paket", "porto", "kurier", "sperrgut"]
 
 
 logging.basicConfig(
@@ -122,6 +124,19 @@ def parse_money_value(text):
     return parse_number_value(price)
 
 
+def parse_money_values(text):
+    if not text:
+        return []
+
+    values = []
+    for match in re.finditer(r"CHF\s*[\d'’.,]+", str(text)):
+        value = parse_number_value(match.group(0))
+        if value is not None:
+            values.append(value)
+
+    return values
+
+
 def parse_location(text):
     if not text:
         return None
@@ -198,15 +213,46 @@ def extract_line_after(lines, keywords):
     return None
 
 
-def extract_section_text(lines, keywords, following_lines=2):
+def contains_keyword_word(text, keywords):
+    if not text:
+        return False
+
+    low = str(text).lower()
+    return any(re.search(r"(?<!\w)" + re.escape(keyword.lower()) + r"(?!\w)", low) for keyword in keywords)
+
+
+def is_ricardo_listing_title(text):
+    return "auf ricardo kaufen" in str(text or "").lower()
+
+
+def has_shipping_method(text):
+    low = str(text or "").lower()
+    return contains_keyword_word(low, SHIPPING_METHOD_KEYWORDS) or any(term in low for term in ["a-post", "b-post"])
+
+
+def extract_section_text(lines, keywords, following_lines=2, whole_word=False):
     for i, line in enumerate(lines):
+        if is_ricardo_listing_title(line):
+            continue
+
         low = line.lower()
-        if any(keyword in low for keyword in keywords):
+        matched = contains_keyword_word(line, keywords) if whole_word else any(keyword in low for keyword in keywords)
+        if matched:
             parts = [line]
             parts.extend(lines[i + 1 : i + 1 + following_lines])
             return clean(" ".join(parts))
 
     return None
+
+
+def sale_format(has_auction, has_buy_now):
+    if has_auction and has_buy_now:
+        return "auction_with_buy_now"
+    if has_auction:
+        return "auction_only"
+    if has_buy_now:
+        return "buy_now_only"
+    return "unknown"
 
 
 def strip_ricardo_title(title):
@@ -306,9 +352,24 @@ def is_pickup_only(text):
         return False
 
     low = text.lower()
-    return any(term in low for term in ["nur abholung", "abholung", "pickup"]) and not any(
-        term in low for term in ["versand", "lieferung per post", "postversand"]
+    has_pickup = contains_keyword_word(low, ["abholung", "pickup"])
+    explicit_pickup_only = any(
+        term in low
+        for term in [
+            "nur abholung",
+            "nur selbstabholung",
+            "kein versand",
+            "keine lieferung",
+            "ohne versand",
+            "pickup only",
+        ]
     )
+    has_delivery = has_shipping_method(low)
+
+    if has_delivery and not explicit_pickup_only:
+        return False
+
+    return explicit_pickup_only or has_pickup
 
 
 def value_contains(value, needle):
@@ -469,7 +530,7 @@ def extract_bid_history_from_state(bid_state):
             }
         )
 
-    return bid_history
+    return bid_history[:MAX_BID_HISTORY]
 
 
 def extract_bid_history_from_text(lines):
@@ -502,7 +563,7 @@ def extract_bid_history_from_text(lines):
 
         i += 1
 
-    return bids
+    return bids[:MAX_BID_HISTORY]
 
 
 def extract_end_time_text(lines):
@@ -519,8 +580,29 @@ def extract_end_time_text(lines):
 def extract_shipping_cost(text):
     if not text:
         return None
+    if is_ricardo_listing_title(text):
+        return None
 
-    return parse_money_value(text)
+    lines = [clean(line) for line in str(text).splitlines() if clean(line)]
+    lines = lines or [clean(text)]
+
+    for line in lines:
+        low = line.lower()
+        amounts = parse_money_values(line)
+        if not amounts:
+            continue
+        if contains_keyword_word(low, ["abholung", "pickup"]) and not (
+            has_shipping_method(low)
+        ):
+            continue
+        if has_shipping_method(low):
+            return next((amount for amount in amounts if amount > 0), amounts[0])
+
+    amounts = parse_money_values(text)
+    if not amounts:
+        return None
+
+    return next((amount for amount in amounts if amount > 0), amounts[0])
 
 
 def build_risk_signals(data):
@@ -552,7 +634,7 @@ def build_risk_signals(data):
         "few_photos": len(data.get("images") or []) < 3,
         "short_description": len(description) < 120,
         "seller_rating_missing": data.get("seller_rating_percent") is None,
-        "only_pickup": bool(data.get("pickup_only")) or ("abholung" in shipping.lower() and "versand" not in shipping.lower()),
+        "only_pickup": bool(data.get("pickup_only")) or is_pickup_only(shipping),
         "risky_words": [word for word in risky_words if word in searchable],
         "shipping_missing": data.get("shipping") is None and not data.get("pickup_only"),
         "bid_count_missing": data.get("bid_count") is None,
@@ -578,6 +660,10 @@ def build_openclaw_payload(data):
             "category": data.get("category"),
             "category_path": data.get("category_path") or [],
             "condition": data.get("condition"),
+            "offer_type": data.get("offer_type"),
+            "sale_format": data.get("sale_format"),
+            "auction_only": data.get("auction_only"),
+            "has_buy_now": data.get("has_buy_now"),
             "description": data.get("description"),
             "image_count": len(images),
             "primary_image_url": images[0] if images else None,
@@ -635,7 +721,7 @@ def parse_ricardo_page(html, page_url):
 
     lines = [clean(x) for x in full_text.split("\n") if clean(x)]
     seller = extract_line_after(lines, ["verkäufer", "anbieter", "seller"])
-    shipping = extract_section_text(lines, ["lieferung", "versand", "abholung"])
+    shipping = extract_section_text(lines, ["lieferung", "versand", "abholung"], following_lines=4, whole_word=True)
     bid_info = extract_section_text(lines, ["gebot", "bieter", "auktion", "sofort kaufen"])
     category = extract_line_after(lines, ["kategorie", "category"])
     pickup_only = is_pickup_only(" ".join(filter(None, [description, shipping])))
@@ -645,14 +731,17 @@ def parse_ricardo_page(html, page_url):
     bids = extract_bid_history_from_state(bid_state) or extract_bid_history_from_text(lines)
     offer_type = str(article_offer.get("offer_type") or "").lower()
     has_auction = "auction" in offer_type or article_offer.get("start_price") is not None or bool(bid_state)
-    has_buy_now = "buynow" in offer_type or ("auction" not in offer_type and article_offer.get("price") is not None)
+    has_buy_now = "buynow" in offer_type or (not has_auction and article_offer.get("price") is not None)
     buy_now_price_chf = parse_number_value(article_offer.get("price")) if has_buy_now else None
-    if buy_now_price_chf is None and str(schema_offer_currency).upper() == "CHF":
+    if has_buy_now and buy_now_price_chf is None and str(schema_offer_currency).upper() == "CHF":
         buy_now_price_chf = schema_offer_price
+    listing_sale_format = sale_format(has_auction, has_buy_now)
 
     bid_count = bid_state.get("bids_count") or article_offer.get("bids_count") or len(bids)
     auction_start_price_chf = cents_to_chf(bid_state.get("start_price") or article_offer.get("start_price"))
     auction_current_price_chf = cents_to_chf(bid_state.get("last_bid") or article_offer.get("last_bid"))
+    if auction_current_price_chf is not None and auction_current_price_chf <= 0:
+        auction_current_price_chf = None
     if auction_current_price_chf is None and has_auction:
         auction_current_price_chf = auction_start_price_chf
     auction_next_minimum_bid_chf = cents_to_chf(
@@ -671,6 +760,10 @@ def parse_ricardo_page(html, page_url):
         "price": f"CHF {current_price_chf:g}" if current_price_chf is not None else parse_price(description) or parse_price(current_lot_text),
         "current_price_chf": current_price_chf,
         "buy_now_price_chf": buy_now_price_chf,
+        "offer_type": offer_type or None,
+        "sale_format": listing_sale_format,
+        "auction_only": listing_sale_format == "auction_only",
+        "has_buy_now": has_buy_now,
         "auction_current_price_chf": auction_current_price_chf,
         "auction_start_price_chf": auction_start_price_chf,
         "auction_next_minimum_bid_chf": auction_next_minimum_bid_chf,
@@ -709,7 +802,7 @@ def parse_ricardo_page(html, page_url):
                 price = offers.get("price")
                 currency = offers.get("priceCurrency")
                 if price and currency:
-                    if data["buy_now_price_chf"] is None and str(currency).upper() == "CHF":
+                    if data["has_buy_now"] and data["buy_now_price_chf"] is None and str(currency).upper() == "CHF":
                         data["buy_now_price_chf"] = parse_number_value(price)
 
     for i, line in enumerate(lines):
@@ -718,7 +811,11 @@ def parse_ricardo_page(html, page_url):
         if data["seller"] is None and any(x in low for x in ["verkäufer", "anbieter", "seller"]):
             data["seller"] = lines[i + 1] if i + 1 < len(lines) else line
 
-        if data["shipping"] is None and any(x in low for x in ["lieferung", "versand", "abholung"]):
+        if (
+            data["shipping"] is None
+            and not is_ricardo_listing_title(line)
+            and contains_keyword_word(low, ["lieferung", "versand", "abholung"])
+        ):
             data["shipping"] = line
 
         if data["bid_info"] is None and any(x in low for x in ["gebot", "bieter", "auktion", "sofort kaufen"]):
@@ -772,6 +869,10 @@ def upsert_csv(path, item):
         "title",
         "current_price_chf",
         "buy_now_price_chf",
+        "offer_type",
+        "sale_format",
+        "auction_only",
+        "has_buy_now",
         "auction_current_price_chf",
         "auction_start_price_chf",
         "auction_next_minimum_bid_chf",
