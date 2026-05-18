@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -11,7 +12,6 @@ from urllib.parse import quote, urlparse
 from bs4 import BeautifulSoup
 from scrapling.fetchers import StealthySession
 
-DEFAULT_URL = "https://www.ricardo.ch/de/a/gummiboot-inkl-padell-1319142602/"
 DEFAULT_OUTPUT_DIR = Path("data/openclaw")
 DEFAULT_RAW_DIR = Path("data/raw")
 
@@ -730,6 +730,20 @@ def parse_ricardo_page(html, page_url):
     return data
 
 
+def ensure_fetchable_page(page, html):
+    status = getattr(page, "status", None)
+    if status is not None and int(status) >= 400:
+        raise RuntimeError(f"Ricardo returned HTTP {status}")
+
+    if not html or len(html) < 500:
+        raise RuntimeError("HTML is empty or too short")
+
+    title_match = re.search(r"<title[^>]*>\s*([^<]+?)\s*</title>", html, re.IGNORECASE)
+    title = clean(title_match.group(1)) if title_match else None
+    if title and title.lower() in {"forbidden", "access denied"}:
+        raise RuntimeError(f"Ricardo returned {title}")
+
+
 def write_json(path, data):
     path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
@@ -826,12 +840,17 @@ def parse_args():
     load_env_file()
 
     parser = argparse.ArgumentParser(description="Parse Ricardo lot data for OpenClaw analysis.")
-    parser.add_argument("--url", default=os.getenv("RICARDO_URL", DEFAULT_URL))
+    parser.add_argument("--url", default=os.getenv("RICARDO_URL"))
     parser.add_argument("--proxy", default=get_proxy_from_env())
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--raw-dir", type=Path, default=DEFAULT_RAW_DIR)
     parser.add_argument("--headless", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if not args.url:
+        parser.error("--url is required or RICARDO_URL must be set")
+
+    return args
 
 
 def main():
@@ -857,8 +876,7 @@ def main():
 
         html = str(page.html_content)
 
-        if not html or len(html) < 500:
-            raise RuntimeError("HTML is empty or too short")
+        ensure_fetchable_page(page, html)
 
         item = parse_ricardo_page(html, page.url)
         paths = save_outputs(html, item, args.output_dir, args.raw_dir)
@@ -874,3 +892,4 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         logging.exception("Parser failed: %s", e)
+        sys.exit(1)
