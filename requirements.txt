@@ -1,0 +1,2 @@
+beautifulsoup4==4.14.3
+scrapling==0.4.8
