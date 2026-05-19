@@ -18,6 +18,8 @@ RICARDO_URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 CHECK_COMMAND_RE = re.compile(r"^\s*/check(?:@\w+)?(?:\s+(.*))?$", re.IGNORECASE)
 LANGUAGE_COMMAND_RE = re.compile(r"^\s*/(?:lang|language)(?:@\w+)?(?:\s+(.*))?$", re.IGNORECASE)
 HELP_COMMAND_RE = re.compile(r"^\s*/(?:start|help)(?:@\w+)?\s*$", re.IGNORECASE)
+SETTINGS_COMMAND_RE = re.compile(r"^\s*/settings(?:@\w+)?\s*$", re.IGNORECASE)
+LANGUAGE_CALLBACK_PREFIX = "language:"
 DEFAULT_OPENCLAW_AGENT_ID = "ricardo-resale"
 DEFAULT_OPENCLAW_TIMEOUT_SECONDS = 600
 DEFAULT_TRANSCRIPT_WAIT_SECONDS = 12
@@ -123,7 +125,66 @@ def send_message(token, chat_id, text, reply_to_message_id=None, reply_markup=No
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
 
-    telegram_request(token, "sendMessage", payload)
+    return telegram_request(token, "sendMessage", payload)
+
+
+def edit_message_text(token, chat_id, message_id, text, reply_markup=None):
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+
+    return telegram_request(token, "editMessageText", payload)
+
+
+def safe_edit_message_text(token, chat_id, message_id, text, reply_markup=None):
+    if not message_id:
+        return False
+
+    try:
+        edit_message_text(token, chat_id, message_id, text, reply_markup)
+        return True
+    except Exception:
+        logging.debug("Failed to edit Telegram message", exc_info=True)
+        return False
+
+
+def answer_callback_query(token, callback_query_id, text=None, show_alert=False):
+    payload = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
+    if show_alert:
+        payload["show_alert"] = True
+
+    return telegram_request(token, "answerCallbackQuery", payload)
+
+
+def set_bot_commands(token):
+    commands = [
+        {"command": "check", "description": "Check a Ricardo.ch lot"},
+        {"command": "language", "description": "Choose answer language"},
+        {"command": "settings", "description": "Show current settings"},
+        {"command": "help", "description": "Show help"},
+    ]
+    try:
+        telegram_request(token, "setMyCommands", {"commands": json.dumps(commands, ensure_ascii=False)})
+    except Exception:
+        logging.warning("Failed to set Telegram bot commands", exc_info=True)
+
+
+def progress_message_id(message):
+    return message.get("message_id") if isinstance(message, dict) else None
+
+
+def send_or_edit_message(token, chat_id, message_id, text, reply_to_message_id=None, reply_markup=None):
+    if safe_edit_message_text(token, chat_id, message_id, text, reply_markup):
+        return
+
+    send_message(token, chat_id, text, reply_to_message_id, reply_markup)
 
 
 def send_chat_action(token, chat_id, action="typing"):
@@ -220,6 +281,10 @@ def is_help_command(text):
     return bool(HELP_COMMAND_RE.match(text or ""))
 
 
+def is_settings_command(text):
+    return bool(SETTINGS_COMMAND_RE.match(text or ""))
+
+
 def normalize_language(value):
     cleaned = re.sub(r"\s+", " ", (value or "").strip().lower())
     return LANGUAGE_ALIASES.get(cleaned)
@@ -233,14 +298,19 @@ def supported_language_text():
     return ", ".join(f"{code}={label}" for code, label in LANGUAGE_LABELS.items())
 
 
-def language_keyboard():
+def language_keyboard(current_language=None):
+    def button(code):
+        label = language_label(code)
+        if code == current_language:
+            label = f"{label} *"
+        return {"text": label, "callback_data": f"{LANGUAGE_CALLBACK_PREFIX}{code}"}
+
     return {
-        "keyboard": [
-            [{"text": "English"}, {"text": "Russian"}],
-            [{"text": "German"}, {"text": "French"}, {"text": "Italian"}, {"text": "Spanish"}],
+        "inline_keyboard": [
+            [button("en"), button("ru")],
+            [button("de"), button("fr")],
+            [button("it"), button("es")],
         ],
-        "resize_keyboard": True,
-        "one_time_keyboard": True,
     }
 
 
@@ -248,24 +318,72 @@ def help_text(chat_id):
     current_language = language_label(get_chat_language(chat_id))
     return "\n".join(
         [
-            "Send a Ricardo.ch lot link or use:",
-            "/check <ricardo_lot_link> [min_profit=30] [max_price=180]",
+            "Ricardo Assistant",
             "",
-            f"OpenClaw response language: {current_language}.",
-            "Choose it before checking a lot with /language en, /language ru, /language de, /language fr, /language it, or /language es.",
+            "Send a Ricardo.ch lot link and I will check it as a Swiss resale opportunity.",
+            "",
+            "Commands:",
+            "/check <ricardo_lot_link> [min_profit=30] [max_price=180]",
+            "/language - choose answer language",
+            "/settings - show current settings",
+            "/help - show this help",
+            "",
+            f"Current answer language: {current_language}.",
         ]
     )
 
 
 def language_help_text(chat_id):
-    current_language = language_label(get_chat_language(chat_id))
+    current_language_code = get_chat_language(chat_id)
+    current_language = language_label(current_language_code)
     return "\n".join(
         [
-            f"Current OpenClaw response language: {current_language}.",
-            f"Supported languages: {supported_language_text()}.",
-            "Use /language <code>, for example /language en or /language ru.",
+            "Answer language",
+            "",
+            f"Current: {current_language}.",
+            f"Supported: {supported_language_text()}.",
+            "",
+            "Choose a language below or use /language <code>, for example /language en.",
         ]
     )
+
+
+def settings_text(chat_id):
+    current_language = language_label(get_chat_language(chat_id))
+    default_language = language_label(default_response_language())
+    return "\n".join(
+        [
+            "Settings",
+            "",
+            f"Answer language: {current_language}",
+            f"Default language: {default_language}",
+            "Language is saved per chat.",
+            "",
+            "Change language with the buttons below or /language <code>.",
+            "Run checks with /check <ricardo_lot_link> [min_profit=30] [max_price=180].",
+        ]
+    )
+
+
+def check_usage_text():
+    return "\n".join(
+        [
+            "Use:",
+            "/check <ricardo_lot_link> [min_profit=30] [max_price=180]",
+            "",
+            "You can also send a Ricardo.ch lot link directly.",
+        ]
+    )
+
+
+def check_progress_text(step):
+    messages = {
+        "parsing": "Processing Ricardo lot...\n\n[1/3] Reading the lot page.",
+        "analyzing": "Processing Ricardo lot...\n\n[2/3] Running resale analysis and market research.",
+        "finalizing": "Processing Ricardo lot...\n\n[3/3] Preparing the Telegram answer.",
+        "delivered": "Analysis finished. OpenClaw sent the answer to this chat.",
+    }
+    return messages[step]
 
 
 def load_bot_settings():
@@ -555,54 +673,80 @@ def handle_message(token, message):
     message_id = message.get("message_id")
 
     if is_help_command(text):
-        send_message(token, chat_id, help_text(chat_id), message_id, language_keyboard())
+        send_message(token, chat_id, help_text(chat_id), message_id, language_keyboard(get_chat_language(chat_id)))
+        return
+
+    if is_settings_command(text):
+        send_message(token, chat_id, settings_text(chat_id), message_id, language_keyboard(get_chat_language(chat_id)))
         return
 
     if is_language_command(text):
         language_code = normalize_language(extract_language_argument(text))
         if not language_code:
-            send_message(token, chat_id, language_help_text(chat_id), message_id, language_keyboard())
+            send_message(
+                token,
+                chat_id,
+                language_help_text(chat_id),
+                message_id,
+                language_keyboard(get_chat_language(chat_id)),
+            )
             return
 
         set_chat_language(chat_id, language_code)
-        send_message(token, chat_id, f"OpenClaw response language set to {language_label(language_code)}.", message_id)
+        send_message(
+            token,
+            chat_id,
+            settings_text(chat_id),
+            message_id,
+            language_keyboard(language_code),
+        )
         return
 
     language_choice = normalize_language(text)
     if language_choice and not extract_ricardo_url(text):
         set_chat_language(chat_id, language_choice)
-        send_message(token, chat_id, f"OpenClaw response language set to {language_label(language_choice)}.", message_id)
+        send_message(
+            token,
+            chat_id,
+            settings_text(chat_id),
+            message_id,
+            language_keyboard(language_choice),
+        )
         return
 
     if is_check_command(text):
         check_argument = extract_check_argument(text)
         url = extract_ricardo_url(check_argument)
         if not url:
-            send_message(
-                token,
-                chat_id,
-                "Use: /check <ricardo_lot_link> [min_profit=30] [max_price=180]",
-                message_id,
-            )
+            send_message(token, chat_id, check_usage_text(), message_id)
             return
     else:
         url = extract_ricardo_url(text)
         check_argument = ""
 
     if not url:
-        send_message(token, chat_id, "Send a Ricardo.ch lot link or use /check <ricardo_lot_link>.", message_id)
+        send_message(token, chat_id, check_usage_text(), message_id)
         return
 
     send_chat_action(token, chat_id)
+    progress_message = send_message(token, chat_id, check_progress_text("parsing"), message_id)
+    status_message_id = progress_message_id(progress_message)
 
     try:
         payload = run_parser(url)
     except Exception as exc:
         logging.exception("Failed to parse Ricardo URL: %s", url)
-        send_message(token, chat_id, format_error("Failed to parse the lot", exc), message_id)
+        send_or_edit_message(
+            token,
+            chat_id,
+            status_message_id,
+            format_error("Failed to parse the lot", exc),
+            message_id,
+        )
         return
 
     send_chat_action(token, chat_id)
+    safe_edit_message_text(token, chat_id, status_message_id, check_progress_text("analyzing"))
 
     try:
         agent_result = run_openclaw_agent(
@@ -613,24 +757,67 @@ def handle_message(token, message):
         )
     except Exception as exc:
         logging.exception("OpenClaw agent failed")
-        send_message(token, chat_id, format_error("OpenClaw agent failed to evaluate the lot", exc), message_id)
+        send_or_edit_message(
+            token,
+            chat_id,
+            status_message_id,
+            format_error("OpenClaw agent failed to evaluate the lot", exc),
+            message_id,
+        )
         return
+
+    safe_edit_message_text(token, chat_id, status_message_id, check_progress_text("finalizing"))
 
     if should_send_agent_reply(agent_result):
         reply_text = agent_reply_text(agent_result)
         if reply_text:
-            send_message(token, chat_id, reply_text, message_id)
+            send_or_edit_message(token, chat_id, status_message_id, reply_text, message_id)
         else:
             session_id = agent_result.get("_openclaw_session_id") or "unknown"
             transcript_path = agent_result.get("_openclaw_transcript_path") or "unknown"
             logging.warning("OpenClaw returned no visible text: session_id=%s transcript=%s", session_id, transcript_path)
-            send_message(
+            send_or_edit_message(
                 token,
                 chat_id,
+                status_message_id,
                 "OpenClaw finished without visible reply text. "
                 f"session_id={session_id}",
                 message_id,
             )
+    else:
+        send_or_edit_message(token, chat_id, status_message_id, check_progress_text("delivered"), message_id)
+
+
+def handle_callback_query(token, callback_query):
+    callback_query_id = callback_query.get("id")
+    data = callback_query.get("data") or ""
+    message = callback_query.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+
+    if not data.startswith(LANGUAGE_CALLBACK_PREFIX):
+        if callback_query_id:
+            answer_callback_query(token, callback_query_id, "Unsupported action.", True)
+        return
+
+    language_code = normalize_language(data.removeprefix(LANGUAGE_CALLBACK_PREFIX))
+    if not language_code or chat_id is None:
+        if callback_query_id:
+            answer_callback_query(token, callback_query_id, "Could not update language.", True)
+        return
+
+    set_chat_language(chat_id, language_code)
+    safe_edit_message_text(
+        token,
+        chat_id,
+        message_id,
+        settings_text(chat_id),
+        language_keyboard(language_code),
+    )
+
+    if callback_query_id:
+        answer_callback_query(token, callback_query_id, f"Language set to {language_label(language_code)}.")
 
 
 def main():
@@ -639,13 +826,15 @@ def main():
     if not token:
         raise SystemExit("TELEGRAM_BOT_TOKEN is required")
 
+    set_bot_commands(token)
+
     offset = None
     logging.info("Telegram bot started")
 
     while True:
         payload = {
             "timeout": 30,
-            "allowed_updates": json.dumps(["message"]),
+            "allowed_updates": json.dumps(["message", "callback_query"]),
         }
         if offset is not None:
             payload["offset"] = offset
@@ -665,6 +854,13 @@ def main():
                     handle_message(token, message)
                 except Exception:
                     logging.exception("Failed to handle Telegram message")
+
+            callback_query = update.get("callback_query")
+            if callback_query:
+                try:
+                    handle_callback_query(token, callback_query)
+                except Exception:
+                    logging.exception("Failed to handle Telegram callback query")
 
 
 if __name__ == "__main__":
