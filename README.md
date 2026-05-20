@@ -3,19 +3,10 @@
 Your assistant for checking Ricardo.ch listings as resale opportunities in Switzerland.
 The assistant communicates with users through Telegram: users send Ricardo listing links to the bot in a Telegram chat and receive the resale analysis back in the same chat.
 
-## Files
-
-- `bot.py` - Telegram polling, handlers, and callbacks.
-- `settings.py` - `.env`, proxy, and per-chat language settings.
-- `openclaw_client.py` - OpenClaw agent execution, JSON parsing, and transcript fallback.
-- `ricardo_parser.py` - importable Ricardo parser.
-- `scrape_page.py` - CLI wrapper for manual parser runs.
-- `telegram_bot.py` and `scrape-page.py` - backward-compatible old entrypoints.
-
 ## Bot Commands
 
 - `/check <ricardo_lot_link> [min_profit=30] [max_price=180]` - check a specific listing.
-- `/find <item> <budget>` - parse live Ricardo.ch search results and return several active listings within a CHF budget, for example `/find видеокарту до 500 франков`.
+- `/find <item> [price_or_range]` - parse live Ricardo.ch search results and return active listings. With a price or range, Ricardo price filters are applied, for example `/find видеокарту до 500 франков` or `/find Видеокарта для игр 350-500 франков`.
 - `/language` or `/lang` - choose the answer language with buttons.
 - `/language <code>` or `/lang <code>` - set the answer language. Supported codes: `en`, `ru`, `de`, `fr`, `it`, `es`.
 - `/settings` - show current chat settings.

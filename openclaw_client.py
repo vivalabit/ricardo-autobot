@@ -6,7 +6,7 @@ import subprocess
 import time
 from datetime import date
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from settings import ROOT_DIR, env_flag, env_int, language_label
 
@@ -46,8 +46,17 @@ def build_agent_message(payload, user_text, check_argument, response_language):
     )
 
 
-def build_find_payload(item_query, budget_chf, *, candidates=None, rejected=None):
+def build_find_payload(item_query, budget_chf=None, *, min_price_chf=None, max_price_chf=None, candidates=None, rejected=None):
     search_url = f"https://www.ricardo.ch/de/s/{quote(item_query.strip(), safe='')}/"
+    resolved_max_price = max_price_chf if max_price_chf is not None else budget_chf
+    params = []
+    if resolved_max_price is not None:
+        params.append(("range_filters.price.max", int(resolved_max_price)))
+    if min_price_chf is not None:
+        params.append(("range_filters.price.min", int(min_price_chf)))
+    if params:
+        search_url = f"{search_url}?{urlencode(params)}"
+
     return {
         "schema": "openclaw.ricardo.search.v1",
         "source": {
@@ -57,7 +66,9 @@ def build_find_payload(item_query, budget_chf, *, candidates=None, rejected=None
         },
         "search": {
             "query": item_query,
-            "max_budget_chf": budget_chf,
+            "min_price_chf": min_price_chf,
+            "max_price_chf": resolved_max_price,
+            "max_budget_chf": resolved_max_price,
             "search_url": search_url,
             "result_count": len(candidates or []),
         },
@@ -66,7 +77,7 @@ def build_find_payload(item_query, budget_chf, *, candidates=None, rejected=None
     }
 
 
-def build_find_agent_message(item_query, budget_chf, user_text, response_language, payload=None):
+def build_find_agent_message(item_query, budget_chf=None, user_text="", response_language=None, payload=None):
     if payload is None:
         payload = build_find_payload(item_query, budget_chf)
 
@@ -76,6 +87,8 @@ def build_find_agent_message(item_query, budget_chf, user_text, response_languag
         "telegram_message": user_text,
         "command": "find",
         "item_query": search.get("query") or item_query,
+        "min_price_chf": search.get("min_price_chf"),
+        "max_price_chf": search.get("max_price_chf"),
         "max_budget_chf": search.get("max_budget_chf") or budget_chf,
         "ricardo_search_url": search.get("search_url") or f"https://www.ricardo.ch/de/s/{quote(item_query.strip(), safe='')}/",
         "ricardo_search_urls": search.get("search_urls") or [],
@@ -94,9 +107,10 @@ def build_find_agent_message(item_query, budget_chf, user_text, response_languag
             "Use only candidates from the provided JSON. Do not add links from web search or old indexed pages.",
             f"Return only the final Telegram-ready answer in {language_name}. Do not return JSON.",
             "Select the best 5-8 candidates when available, each with title, price, direct Ricardo.ch URL, and a short reason why it fits.",
+            "If min_price_chf or max_price_chf is present, treat it as the user's intended price range. If no price is present, choose broadly interesting deals.",
             "Prefer gaming-relevant cards for gaming requests, and avoid candidates with risk_flags unless they are the only options.",
             "For auctions, mention that the current price may rise.",
-            "If the candidates list is empty, say that no parser-verified active Ricardo listings were found under budget and suggest better search terms.",
+            "If the candidates list is empty, say that no parser-verified active Ricardo listings were found and suggest better search terms.",
             "Do not invent listings, prices, seller details, or URLs.",
             "",
             "Request context:",

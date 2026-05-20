@@ -34,11 +34,12 @@ For a search request (`schema: openclaw.ricardo.search.v1`):
 - Use only the `candidates` array from the provided JSON. Do not add listings from generic web search, old indexed pages, or memory.
 - Return the best 5–8 relevant candidates when available.
 - Each candidate should include title, current price, direct Ricardo.ch link, and a short reason why it fits.
+- If `min_price_chf` or `max_price_chf` is present, treat it as the user's intended price range. If no price is present, choose broadly interesting deals.
 - Prefer gaming-relevant cards for gaming requests, and avoid candidates with `risk_flags` unless they are the only options.
 - Prefer clearly relevant listings with transparent price, condition, seller/location, and shipping details.
 - Only include listings marked active by the parser.
 - For auctions, mention that the final price may rise and avoid presenting the current bid as guaranteed final price.
-- Do not invent listings or links. If the candidates list is empty, say that no parser-verified active Ricardo listings were found under budget and suggest better search terms.
+- Do not invent listings or links. If the candidates list is empty, say that no parser-verified active Ricardo listings were found and suggest better search terms.
 - Keep the search response concise and practical for Telegram.
 
 Do not return JSON to the user. Return the finished Telegram text.

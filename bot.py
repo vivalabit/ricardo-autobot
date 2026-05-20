@@ -107,30 +107,49 @@ def parse_find_argument(argument):
         budget_range_match = match
 
     if budget_range_match:
-        budget = parse_budget_amount(budget_range_match.group("high"))
+        min_price = parse_budget_amount(budget_range_match.group("low"))
+        max_price = parse_budget_amount(budget_range_match.group("high"))
         item_query = f"{cleaned[:budget_range_match.start()]} {cleaned[budget_range_match.end():]}".strip(" ,;:-")
         item_query = re.sub(r"\s+", " ", item_query).strip()
         if item_query:
-            return {"item_query": item_query, "budget_chf": budget}
+            return {
+                "item_query": item_query,
+                "budget_chf": max_price,
+                "min_price_chf": min_price,
+                "max_price_chf": max_price,
+            }
 
     budget_match = None
     for match in FIND_BUDGET_RE.finditer(cleaned):
         budget = parse_budget_amount(match.group("amount"))
         if not budget:
             continue
+        has_budget_signal = bool(match.group("marker") or match.group("currency_before") or match.group("currency_after"))
+        if not has_budget_signal and budget > 2000:
+            continue
         budget_match = match
 
-    if not budget_match:
-        return None
+    if budget_match:
+        budget = parse_budget_amount(budget_match.group("amount"))
+        item_query = f"{cleaned[:budget_match.start()]} {cleaned[budget_match.end():]}".strip(" ,;:-")
+        item_query = re.sub(r"\s+", " ", item_query).strip()
 
-    budget = parse_budget_amount(budget_match.group("amount"))
-    item_query = f"{cleaned[:budget_match.start()]} {cleaned[budget_match.end():]}".strip(" ,;:-")
-    item_query = re.sub(r"\s+", " ", item_query).strip()
+        if item_query:
+            return {
+                "item_query": item_query,
+                "budget_chf": budget,
+                "min_price_chf": None,
+                "max_price_chf": budget,
+            }
 
-    if not item_query:
-        return None
+    item_query = cleaned
 
-    return {"item_query": item_query, "budget_chf": budget}
+    return {
+        "item_query": item_query,
+        "budget_chf": None,
+        "min_price_chf": None,
+        "max_price_chf": None,
+    }
 
 
 def is_language_command(text):
@@ -251,10 +270,10 @@ def run_parser(url):
     return parse_ricardo_url(url, headless=True)
 
 
-def run_search_parser(item_query, budget_chf):
+def run_search_parser(item_query, max_price_chf=None, min_price_chf=None):
     from ricardo_parser import parse_ricardo_search
 
-    return parse_ricardo_search(item_query, budget_chf, headless=True)
+    return parse_ricardo_search(item_query, max_price_chf, min_price_chf=min_price_chf, headless=True)
 
 
 def format_error(prefix, exc):
@@ -289,7 +308,7 @@ def help_text(chat_id):
             "",
             "Commands:",
             "/check <ricardo_lot_link> [min_profit=30] [max_price=180]",
-            "/find <item> <budget>",
+            "/find <item> [price_or_range]",
             "/language - choose answer language",
             "/settings - show current settings",
             "/help - show this help",
@@ -327,7 +346,7 @@ def settings_text(chat_id):
             "",
             "Change language with the buttons below or /language <code>.",
             "Run checks with /check <ricardo_lot_link> [min_profit=30] [max_price=180].",
-            "Find items with /find <item> <budget>, for example /find видеокарту до 500 франков.",
+            "Find items with /find <item> [price_or_range], for example /find видеокарту до 500 франков.",
         ]
     )
 
@@ -347,10 +366,12 @@ def find_usage_text():
     return "\n".join(
         [
             "Use:",
-            "/find <item> <budget>",
+            "/find <item> [price_or_range]",
             "",
             "Examples:",
+            "/find Видеокарта для игр",
             "/find видеокарту до 500 франков",
+            "/find Видеокарта для игр 350-500 франков",
             "/find RTX 4070 500 CHF",
         ]
     )
@@ -434,16 +455,23 @@ def handle_message(token, message):
             return
 
         item_query = find_request["item_query"]
-        budget_chf = find_request["budget_chf"]
+        budget_chf = find_request.get("budget_chf")
+        min_price_chf = find_request.get("min_price_chf")
+        max_price_chf = find_request.get("max_price_chf")
 
         send_chat_action(token, chat_id)
         progress_message = send_message(token, chat_id, find_progress_text("searching"), message_id)
         status_message_id = progress_message_id(progress_message)
 
         try:
-            payload = run_search_parser(item_query, budget_chf)
+            payload = run_search_parser(item_query, max_price_chf, min_price_chf)
         except Exception as exc:
-            logging.exception("Failed to parse Ricardo search: query=%s budget=%s", item_query, budget_chf)
+            logging.exception(
+                "Failed to parse Ricardo search: query=%s min_price=%s max_price=%s",
+                item_query,
+                min_price_chf,
+                max_price_chf,
+            )
             send_or_edit_message(
                 token,
                 chat_id,

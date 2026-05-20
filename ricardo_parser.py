@@ -4,7 +4,7 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote, urlencode, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from scrapling.fetchers import StealthySession
@@ -175,9 +175,19 @@ def parse_listing_id(page_url):
     return re.sub(r"\W+", "-", path.strip("/")).strip("-") or "ricardo-item"
 
 
-def build_ricardo_search_url(query, language="de"):
+def build_ricardo_search_url(query, language="de", *, min_price_chf=None, max_price_chf=None):
     language = language if language in {"de", "fr", "it", "en"} else "de"
-    return f"https://www.ricardo.ch/{language}/s/{quote(clean(query) or '', safe='')}/"
+    url = f"https://www.ricardo.ch/{language}/s/{quote(clean(query) or '', safe='')}/"
+    params = []
+    if max_price_chf is not None:
+        params.append(("range_filters.price.max", int(max_price_chf)))
+    if min_price_chf is not None:
+        params.append(("range_filters.price.min", int(min_price_chf)))
+
+    if params:
+        url = f"{url}?{urlencode(params)}"
+
+    return url
 
 
 def append_unique(values, value):
@@ -1132,10 +1142,11 @@ def merge_search_candidate_with_lot(search_candidate, item, activity):
 
 def build_openclaw_search_payload(
     query,
-    budget_chf,
+    max_price_chf,
     search_url,
     candidates,
     *,
+    min_price_chf=None,
     scanned_count,
     rejected=None,
     query_variants=None,
@@ -1151,7 +1162,9 @@ def build_openclaw_search_payload(
         },
         "search": {
             "query": query,
-            "max_budget_chf": budget_chf,
+            "min_price_chf": min_price_chf,
+            "max_price_chf": max_price_chf,
+            "max_budget_chf": max_price_chf,
             "search_url": search_url,
             "query_variants": query_variants or [query],
             "search_urls": search_urls or [search_url],
@@ -1166,8 +1179,9 @@ def build_openclaw_search_payload(
 
 def fetch_ricardo_search(
     query,
-    budget_chf,
+    max_price_chf=None,
     *,
+    min_price_chf=None,
     proxy=None,
     output_dir=DEFAULT_OUTPUT_DIR,
     raw_dir=DEFAULT_RAW_DIR,
@@ -1181,7 +1195,10 @@ def fetch_ricardo_search(
     if not query_variants:
         raise RuntimeError("Could not build German Ricardo search terms for this request")
 
-    search_urls = [build_ricardo_search_url(search_query) for search_query in query_variants]
+    search_urls = [
+        build_ricardo_search_url(search_query, min_price_chf=min_price_chf, max_price_chf=max_price_chf)
+        for search_query in query_variants
+    ]
     search_url = search_urls[0]
     logging.info("Starting browser session")
 
@@ -1244,8 +1261,11 @@ def fetch_ricardo_search(
                 if price is None:
                     rejected.append({"url": candidate["url"], "reason": "missing_search_page_price"})
                     continue
-                if float(price) > float(budget_chf):
+                if max_price_chf is not None and float(price) > float(max_price_chf):
                     rejected.append({"url": candidate["url"], "reason": "over_budget", "price_chf": price})
+                    continue
+                if min_price_chf is not None and float(price) < float(min_price_chf):
+                    rejected.append({"url": candidate["url"], "reason": "under_min_price", "price_chf": price})
                     continue
 
                 candidates.append(candidate)
@@ -1263,8 +1283,11 @@ def fetch_ricardo_search(
                     rejected.append({"url": lot_page.url, "reason": ",".join(activity["reasons"])})
                     candidates[index] = {**candidate, "active_check": activity}
                     continue
-                if price is not None and float(price) > float(budget_chf):
+                if price is not None and max_price_chf is not None and float(price) > float(max_price_chf):
                     rejected.append({"url": lot_page.url, "reason": "over_budget_after_enrichment", "price_chf": price})
+                    continue
+                if price is not None and min_price_chf is not None and float(price) < float(min_price_chf):
+                    rejected.append({"url": lot_page.url, "reason": "under_min_price_after_enrichment", "price_chf": price})
                     continue
 
                 candidates[index] = merge_search_candidate_with_lot(candidate, item, activity)
@@ -1279,7 +1302,9 @@ def fetch_ricardo_search(
         price = candidate.get("price_chf")
         if activity.get("active") is False:
             continue
-        if price is not None and float(price) > float(budget_chf):
+        if price is not None and max_price_chf is not None and float(price) > float(max_price_chf):
+            continue
+        if price is not None and min_price_chf is not None and float(price) < float(min_price_chf):
             continue
         filtered_candidates.append(candidate)
     candidates = filtered_candidates[:result_limit]
@@ -1290,9 +1315,10 @@ def fetch_ricardo_search(
 
     payload = build_openclaw_search_payload(
         query,
-        budget_chf,
+        max_price_chf,
         search_url,
         candidates,
+        min_price_chf=min_price_chf,
         scanned_count=scanned_count,
         rejected=rejected,
         query_variants=query_variants,
@@ -1312,8 +1338,9 @@ def fetch_ricardo_search(
 
 def parse_ricardo_search(
     query,
-    budget_chf,
+    max_price_chf=None,
     *,
+    min_price_chf=None,
     proxy=None,
     output_dir=DEFAULT_OUTPUT_DIR,
     raw_dir=DEFAULT_RAW_DIR,
@@ -1325,7 +1352,8 @@ def parse_ricardo_search(
 ):
     _, payload, _ = fetch_ricardo_search(
         query,
-        budget_chf,
+        max_price_chf,
+        min_price_chf=min_price_chf,
         proxy=proxy,
         output_dir=output_dir,
         raw_dir=raw_dir,

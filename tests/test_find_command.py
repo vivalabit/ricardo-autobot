@@ -15,37 +15,43 @@ class FindCommandTest(unittest.TestCase):
     def test_extracts_russian_budget_phrase(self):
         self.assertEqual(
             parse_find_argument("видеокарту до 500 франков"),
-            {"item_query": "видеокарту", "budget_chf": 500},
+            {"item_query": "видеокарту", "budget_chf": 500, "min_price_chf": None, "max_price_chf": 500},
         )
 
     def test_keeps_model_number_in_item_query(self):
         self.assertEqual(
             parse_find_argument("RTX 4070 500 CHF"),
-            {"item_query": "RTX 4070", "budget_chf": 500},
+            {"item_query": "RTX 4070", "budget_chf": 500, "min_price_chf": None, "max_price_chf": 500},
+        )
+
+    def test_allows_find_without_price(self):
+        self.assertEqual(
+            parse_find_argument("RTX 4070"),
+            {"item_query": "RTX 4070", "budget_chf": None, "min_price_chf": None, "max_price_chf": None},
         )
 
     def test_parses_swiss_thousands_separator(self):
         self.assertEqual(
             parse_find_argument("macbook pro 1'200 CHF"),
-            {"item_query": "macbook pro", "budget_chf": 1200},
+            {"item_query": "macbook pro", "budget_chf": 1200, "min_price_chf": None, "max_price_chf": 1200},
         )
 
     def test_parses_budget_range_as_upper_budget(self):
         self.assertEqual(
             parse_find_argument("Видеокарта для игр 350-500 франков"),
-            {"item_query": "Видеокарта для игр", "budget_chf": 500},
+            {"item_query": "Видеокарта для игр", "budget_chf": 500, "min_price_chf": 350, "max_price_chf": 500},
         )
 
     def test_parses_swiss_price_suffix(self):
         self.assertEqual(
             parse_find_argument("stand mixer 500.-"),
-            {"item_query": "stand mixer", "budget_chf": 500},
+            {"item_query": "stand mixer", "budget_chf": 500, "min_price_chf": None, "max_price_chf": 500},
         )
 
     def test_consumes_full_currency_word(self):
         self.assertEqual(
             parse_find_argument("monitor 500 francs"),
-            {"item_query": "monitor", "budget_chf": 500},
+            {"item_query": "monitor", "budget_chf": 500, "min_price_chf": None, "max_price_chf": 500},
         )
 
     def test_parses_find_command_with_bot_username(self):
@@ -58,11 +64,23 @@ class FindCommandTest(unittest.TestCase):
     def test_find_payload_contains_direct_ricardo_search_url(self):
         self.assertEqual(
             build_find_payload("RTX 4070", 500)["search"]["search_url"],
-            "https://www.ricardo.ch/de/s/RTX%204070/",
+            "https://www.ricardo.ch/de/s/RTX%204070/?range_filters.price.max=500",
+        )
+
+    def test_find_payload_contains_price_range_search_url(self):
+        self.assertEqual(
+            build_find_payload("grafikkarte", min_price_chf=300, max_price_chf=450)["search"]["search_url"],
+            "https://www.ricardo.ch/de/s/grafikkarte/?range_filters.price.max=450&range_filters.price.min=300",
         )
 
     def test_parser_search_url_matches_find_payload_url(self):
         self.assertEqual(build_ricardo_search_url("RTX 4070"), "https://www.ricardo.ch/de/s/RTX%204070/")
+
+    def test_parser_search_url_includes_price_range_filters(self):
+        self.assertEqual(
+            build_ricardo_search_url("grafikkarte", min_price_chf=300, max_price_chf=450),
+            "https://www.ricardo.ch/de/s/grafikkarte/?range_filters.price.max=450&range_filters.price.min=300",
+        )
 
     def test_builds_translated_search_queries_for_russian_item(self):
         self.assertEqual(
