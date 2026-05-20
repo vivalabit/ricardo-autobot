@@ -28,6 +28,12 @@ from settings import (
 RICARDO_URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 CHECK_COMMAND_RE = re.compile(r"^\s*/check(?:@\w+)?(?:\s+(.*))?$", re.IGNORECASE)
 FIND_COMMAND_RE = re.compile(r"^\s*/find(?:@\w+)?(?:\s+(.*))?$", re.IGNORECASE)
+FIND_BUDGET_RANGE_RE = re.compile(
+    r"(?P<low>\d[\d'’.,]*)\s*(?:-|–|—|to|bis|до)\s*"
+    r"(?P<high>\d[\d'’.,]*)"
+    r"(?:\s*(?P<currency>chf|sfr|francs?|franken|frs?\.?|франк(?:ов|а|и)?|\.-))?",
+    re.IGNORECASE,
+)
 FIND_BUDGET_RE = re.compile(
     r"(?P<marker>(?:до|макс(?:имум)?|max(?:imum)?|under|up\s+to|<=|bis|unter|for|für|pour|jusqu[’']?a|jusqu[’']?à|moins\s+de)\s+)?"
     r"(?P<currency_before>(?:chf|sfr|francs?|franken|frs?\.?|франк(?:ов|а|и)?)\s+)?"
@@ -91,6 +97,21 @@ def parse_find_argument(argument):
     cleaned = re.sub(r"\s+", " ", (argument or "").strip())
     if not cleaned:
         return None
+
+    budget_range_match = None
+    for match in FIND_BUDGET_RANGE_RE.finditer(cleaned):
+        low_budget = parse_budget_amount(match.group("low"))
+        high_budget = parse_budget_amount(match.group("high"))
+        if not low_budget or not high_budget or high_budget < low_budget or high_budget < 50:
+            continue
+        budget_range_match = match
+
+    if budget_range_match:
+        budget = parse_budget_amount(budget_range_match.group("high"))
+        item_query = f"{cleaned[:budget_range_match.start()]} {cleaned[budget_range_match.end():]}".strip(" ,;:-")
+        item_query = re.sub(r"\s+", " ", item_query).strip()
+        if item_query:
+            return {"item_query": item_query, "budget_chf": budget}
 
     budget_match = None
     for match in FIND_BUDGET_RE.finditer(cleaned):

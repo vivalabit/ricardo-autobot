@@ -30,9 +30,11 @@ For a single listing, the answer should include:
 
 For a search request (`schema: openclaw.ricardo.search.v1`):
 - The bot parser already opened the live Ricardo search page and candidate listing pages.
+- For non-German user requests, the parser searches German Ricardo query variants. Use the original user request only to understand intent and answer wording.
 - Use only the `candidates` array from the provided JSON. Do not add listings from generic web search, old indexed pages, or memory.
-- Return 3–7 relevant candidates when available.
+- Return the best 5–8 relevant candidates when available.
 - Each candidate should include title, current price, direct Ricardo.ch link, and a short reason why it fits.
+- Prefer gaming-relevant cards for gaming requests, and avoid candidates with `risk_flags` unless they are the only options.
 - Prefer clearly relevant listings with transparent price, condition, seller/location, and shipping details.
 - Only include listings marked active by the parser.
 - For auctions, mention that the final price may rise and avoid presenting the current bid as guaranteed final price.

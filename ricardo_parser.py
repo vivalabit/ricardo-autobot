@@ -14,8 +14,9 @@ from settings import get_proxy_from_env
 DEFAULT_OUTPUT_DIR = Path("data/openclaw")
 DEFAULT_RAW_DIR = Path("data/raw")
 MAX_BID_HISTORY = 10
-DEFAULT_SEARCH_RESULT_LIMIT = 7
-DEFAULT_SEARCH_SCAN_LIMIT = 30
+DEFAULT_SEARCH_RESULT_LIMIT = 15
+DEFAULT_SEARCH_SCAN_LIMIT = 60
+DEFAULT_SEARCH_ENRICH_LIMIT = 3
 SHIPPING_METHOD_KEYWORDS = ["versand", "postversand", "paket", "porto", "kurier", "sperrgut"]
 SEARCH_QUERY_ALIASES = [
     (r"\b(?:видео\s*карт\w*|видеокарт\w*|графическ\w*\s+карт\w*)\b", ["grafikkarte", "gpu"]),
@@ -27,6 +28,11 @@ SEARCH_QUERY_ALIASES = [
     (r"\bпылесос\w*\b", ["staubsauger"]),
     (r"\b(?:камер\w*|фотоаппарат\w*)\b", ["kamera"]),
     (r"\bчас\w*\b", ["uhr"]),
+]
+GERMAN_SEARCH_TERM_REPLACEMENTS = [
+    (r"\b(?:для\s+игр|игров\w*)\b", "gaming"),
+    (r"\b(?:нов\w*|новый|новая|новое)\b", "neu"),
+    (r"\b(?:б\s*/?\s*у|бу|подержанн\w*)\b", "gebraucht"),
 ]
 
 
@@ -180,45 +186,202 @@ def append_unique(values, value):
         values.append(value)
 
 
+def contains_cyrillic(text):
+    return bool(re.search(r"[А-Яа-яЁё]", text or ""))
+
+
+def germanize_search_terms(text):
+    value = clean(text) or ""
+    for pattern, replacement in GERMAN_SEARCH_TERM_REPLACEMENTS:
+        value = re.sub(pattern, replacement, value, flags=re.IGNORECASE)
+
+    value = re.sub(r"[А-Яа-яЁё]+", " ", value)
+    value = re.sub(r"\s+", " ", value).strip(" ,;:-")
+    return clean(value)
+
+
 def build_ricardo_search_queries(query):
     cleaned = clean(query) or ""
     variants = []
-    append_unique(variants, cleaned)
+    search_in_german_only = contains_cyrillic(cleaned)
+    if not search_in_german_only:
+        append_unique(variants, cleaned)
 
     for pattern, aliases in SEARCH_QUERY_ALIASES:
         if not re.search(pattern, cleaned, flags=re.IGNORECASE):
             continue
 
         remainder = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
-        remainder = clean(remainder.strip(" ,;:-"))
+        remainder = germanize_search_terms(remainder)
         for alias in aliases:
-            append_unique(variants, f"{alias} {remainder}" if remainder else alias)
-        append_unique(variants, remainder)
+            if remainder:
+                append_unique(variants, f"{alias} {remainder}")
+                append_unique(variants, f"{remainder} {alias}")
+            append_unique(variants, alias)
+        if not search_in_german_only:
+            append_unique(variants, remainder)
 
     return variants
 
 
 def extract_search_listing_urls(html, base_url="https://www.ricardo.ch/"):
+    return [candidate["url"] for candidate in extract_search_card_candidates(html, base_url)]
+
+
+def normalize_ricardo_listing_url(url, base_url="https://www.ricardo.ch/"):
+    absolute_url = urljoin(base_url, url or "")
+    parsed = urlparse(absolute_url)
+    if not parsed.netloc.endswith("ricardo.ch"):
+        return None
+    if not re.search(r"/(?:de|fr|it|en)/a/.+-\d{6,}/?$", parsed.path):
+        return None
+
+    return parsed._replace(query="", fragment="").geturl()
+
+
+def extract_search_card_money_values(text):
+    values = []
+    for match in re.finditer(r"(?<![\w:])\d{1,3}(?:[’']\d{3})*(?:\.\d{2})(?!\w)", text or ""):
+        value = parse_number_value(match.group(0))
+        if value is not None:
+            values.append(value)
+    return values
+
+
+def extract_search_card_title(link):
+    ignored_alts = {"beliebt", "ricardo ai icon", "moneyguard"}
+    image = link.find("img", alt=True)
+    for image in link.find_all("img", alt=True):
+        alt = clean(image.get("alt"))
+        if not alt or alt.lower() in ignored_alts:
+            continue
+        return alt
+
+    ignored_texts = ignored_alts | {"|"}
+    title_candidates = []
+    price_pattern = re.compile(r"^\d{1,3}(?:[’']\d{3})*(?:\.\d{2})$")
+
+    for element in link.find_all(["span", "p", "h2", "h3"]):
+        text = clean(element.get_text(" ", strip=True))
+        if not text or text.lower() in ignored_texts:
+            continue
+        if price_pattern.match(text) or parse_bid_count(text) is not None:
+            continue
+        if "sofort kaufen" in text.lower():
+            continue
+        title_candidates.append(text)
+
+    if title_candidates:
+        return max(title_candidates, key=len)
+
+    return None
+
+
+def search_card_sale_format(text, money_values):
+    low = (text or "").lower()
+    has_auction = "gebot" in low or "bieter" in low
+    has_buy_now = "sofort kaufen" in low
+
+    if has_auction and has_buy_now:
+        return "auction_with_buy_now"
+    if has_auction:
+        return "auction_only"
+    if has_buy_now or len(money_values) == 1:
+        return "buy_now_only"
+    return "unknown"
+
+
+def search_candidate_risk_flags(*parts):
+    text = " ".join(clean(part) or "" for part in parts).lower()
+    risky_words = [
+        "defekt",
+        "ungetestet",
+        "bastler",
+        "ersatzteil",
+        "artefakte",
+        "funktioniert nicht",
+    ]
+    return [word for word in risky_words if word in text]
+
+
+def build_search_page_candidate(link, base_url, search_query=None):
+    url = normalize_ricardo_listing_url(link.get("href"), base_url)
+    if not url:
+        return None
+
+    title = extract_search_card_title(link)
+    text = clean(link.get_text(" ", strip=True)) or ""
+    summary = text.replace(title, "", 1) if title else text
+    summary = re.sub(r"^(?:beliebt\s*)?[|,\s-]+", "", summary, flags=re.IGNORECASE)
+    summary = clean(summary)
+
+    money_values = extract_search_card_money_values(text)
+    sale_format_value = search_card_sale_format(text, money_values)
+    price_chf = money_values[0] if money_values else None
+    buy_now_price_chf = None
+    auction_current_price_chf = None
+    if sale_format_value == "auction_with_buy_now":
+        auction_current_price_chf = money_values[0] if money_values else None
+        buy_now_price_chf = money_values[1] if len(money_values) > 1 else None
+    elif sale_format_value == "auction_only":
+        auction_current_price_chf = money_values[0] if money_values else None
+    elif sale_format_value == "buy_now_only":
+        buy_now_price_chf = money_values[0] if money_values else None
+
+    image = link.find("img", src=True)
+    bid_count = parse_bid_count(text)
+    listing_id = parse_listing_id(url)
+
+    return {
+        "listing_id": listing_id,
+        "title": title,
+        "url": url,
+        "price_chf": price_chf,
+        "buy_now_price_chf": buy_now_price_chf,
+        "auction_current_price_chf": auction_current_price_chf,
+        "auction_next_minimum_bid_chf": None,
+        "sale_format": sale_format_value,
+        "condition": None,
+        "location": None,
+        "shipping_cost_chf": None,
+        "shipping": None,
+        "pickup_only": None,
+        "seller": None,
+        "seller_rating_percent": None,
+        "seller_sales_count": None,
+        "bid_count": bid_count,
+        "auction_end_at": None,
+        "active_check": {
+            "active": True,
+            "confidence": "search_page",
+            "has_action_signal": True,
+            "reasons": [],
+        },
+        "risk_flags": search_candidate_risk_flags(title, summary),
+        "description_excerpt": summary[:260] if summary else None,
+        "primary_image_url": image.get("src") if image else None,
+        "matched_search_query": search_query,
+        "candidate_source": "search_page_card",
+    }
+
+
+def extract_search_card_candidates(html, base_url="https://www.ricardo.ch/", search_query=None):
     soup = BeautifulSoup(html or "", "html.parser")
-    urls = []
     seen = set()
+    candidates = []
 
     for link in soup.find_all("a", href=True):
-        absolute_url = urljoin(base_url, link.get("href"))
-        parsed = urlparse(absolute_url)
-        if not parsed.netloc.endswith("ricardo.ch"):
-            continue
-        if not re.search(r"/(?:de|fr|it|en)/a/.+-\d{6,}/?$", parsed.path):
+        candidate = build_search_page_candidate(link, base_url, search_query)
+        if not candidate:
             continue
 
-        normalized = parsed._replace(query="", fragment="").geturl()
-        if normalized in seen:
+        if candidate["url"] in seen:
             continue
 
-        seen.add(normalized)
-        urls.append(normalized)
+        seen.add(candidate["url"])
+        candidates.append(candidate)
 
-    return urls
+    return candidates
 
 
 def extract_line_after(lines, keywords):
@@ -921,6 +1084,12 @@ def build_search_candidate(item, activity):
     description = clean(item.get("description")) or ""
     if len(description) > 260:
         description = f"{description[:257].rstrip()}..."
+    images = item.get("images") or []
+
+    risk_signals = build_risk_signals(item)
+    risk_flags = [
+        key for key, value in risk_signals.items() if value is True or (isinstance(value, list) and value)
+    ]
 
     return {
         "listing_id": item.get("listing_id"),
@@ -942,8 +1111,23 @@ def build_search_candidate(item, activity):
         "bid_count": item.get("bid_count"),
         "auction_end_at": item.get("auction_end_at"),
         "active_check": activity,
+        "risk_flags": risk_flags,
         "description_excerpt": description,
+        "primary_image_url": images[0] if images else None,
+        "candidate_source": "listing_page",
     }
+
+
+def merge_search_candidate_with_lot(search_candidate, item, activity):
+    detailed = build_search_candidate(item, activity)
+    merged = dict(search_candidate)
+    for key, value in detailed.items():
+        if value is not None and value != []:
+            merged[key] = value
+
+    merged["matched_search_query"] = search_candidate.get("matched_search_query")
+    merged["candidate_source"] = "search_page_card_enriched"
+    return merged
 
 
 def build_openclaw_search_payload(
@@ -956,6 +1140,7 @@ def build_openclaw_search_payload(
     rejected=None,
     query_variants=None,
     search_urls=None,
+    enriched_count=0,
 ):
     return {
         "schema": "openclaw.ricardo.search.v1",
@@ -972,6 +1157,7 @@ def build_openclaw_search_payload(
             "search_urls": search_urls or [search_url],
             "scanned_listing_count": scanned_count,
             "result_count": len(candidates),
+            "enriched_listing_count": enriched_count,
         },
         "candidates": candidates,
         "rejected": (rejected or [])[:10],
@@ -988,9 +1174,13 @@ def fetch_ricardo_search(
     headless=False,
     result_limit=DEFAULT_SEARCH_RESULT_LIMIT,
     scan_limit=DEFAULT_SEARCH_SCAN_LIMIT,
+    enrich_limit=DEFAULT_SEARCH_ENRICH_LIMIT,
     save=True,
 ):
     query_variants = build_ricardo_search_queries(query)
+    if not query_variants:
+        raise RuntimeError("Could not build German Ricardo search terms for this request")
+
     search_urls = [build_ricardo_search_url(search_query) for search_query in query_variants]
     search_url = search_urls[0]
     logging.info("Starting browser session")
@@ -1009,6 +1199,7 @@ def fetch_ricardo_search(
     scanned_count = 0
     seen_listing_urls = set()
     fetched_search_pages = 0
+    enriched_count = 0
 
     with StealthySession(**session_kwargs) as session:
         for search_query, current_search_url in zip(query_variants, search_urls):
@@ -1037,42 +1228,61 @@ def fetch_ricardo_search(
                 raw_path = raw_dir / f"ricardo_search_{search_slug[:80]}.html"
                 raw_path.write_text(html, encoding="utf-8")
 
-            listing_urls = extract_search_listing_urls(html, page.url)
-            logging.info("Found %s listing URLs in search page", len(listing_urls))
+            search_page_candidates = extract_search_card_candidates(html, page.url, search_query)
+            logging.info("Found %s search card candidates in search page", len(search_page_candidates))
 
-            for listing_url in listing_urls:
+            for candidate in search_page_candidates:
                 if len(candidates) >= result_limit or scanned_count >= scan_limit:
                     break
-                if listing_url in seen_listing_urls:
+                if candidate["url"] in seen_listing_urls:
                     continue
 
-                seen_listing_urls.add(listing_url)
+                seen_listing_urls.add(candidate["url"])
                 scanned_count += 1
+                price = candidate.get("price_chf")
 
-                try:
-                    lot_page = session.fetch(listing_url, google_search=False)
-                    lot_html = str(lot_page.html_content)
-                    ensure_fetchable_page(lot_page, lot_html)
-                    item = parse_ricardo_page(lot_html, lot_page.url)
-                    activity = classify_listing_activity(item, lot_html, from_live_search=True)
-                    price = listing_budget_price(item)
+                if price is None:
+                    rejected.append({"url": candidate["url"], "reason": "missing_search_page_price"})
+                    continue
+                if float(price) > float(budget_chf):
+                    rejected.append({"url": candidate["url"], "reason": "over_budget", "price_chf": price})
+                    continue
 
-                    if not activity["active"]:
-                        rejected.append({"url": lot_page.url, "reason": ",".join(activity["reasons"])})
-                        continue
-                    if price is None:
-                        rejected.append({"url": lot_page.url, "reason": "missing_price"})
-                        continue
-                    if float(price) > float(budget_chf):
-                        rejected.append({"url": lot_page.url, "reason": "over_budget", "price_chf": price})
-                        continue
+                candidates.append(candidate)
 
-                    candidate = build_search_candidate(item, activity)
-                    candidate["matched_search_query"] = search_query
-                    candidates.append(candidate)
-                except Exception as exc:
-                    logging.warning("Failed to parse search candidate %s: %s", listing_url, exc)
-                    rejected.append({"url": listing_url, "reason": str(exc)[:180]})
+        for index, candidate in enumerate(list(candidates[: max(0, enrich_limit)])):
+            try:
+                lot_page = session.fetch(candidate["url"], google_search=False)
+                lot_html = str(lot_page.html_content)
+                ensure_fetchable_page(lot_page, lot_html)
+                item = parse_ricardo_page(lot_html, lot_page.url)
+                activity = classify_listing_activity(item, lot_html, from_live_search=True)
+                price = listing_budget_price(item) or candidate.get("price_chf")
+
+                if not activity["active"]:
+                    rejected.append({"url": lot_page.url, "reason": ",".join(activity["reasons"])})
+                    candidates[index] = {**candidate, "active_check": activity}
+                    continue
+                if price is not None and float(price) > float(budget_chf):
+                    rejected.append({"url": lot_page.url, "reason": "over_budget_after_enrichment", "price_chf": price})
+                    continue
+
+                candidates[index] = merge_search_candidate_with_lot(candidate, item, activity)
+                enriched_count += 1
+            except Exception as exc:
+                logging.warning("Failed to enrich search candidate %s: %s", candidate["url"], exc)
+                rejected.append({"url": candidate["url"], "reason": f"enrichment_failed: {str(exc)[:150]}"})
+
+    filtered_candidates = []
+    for candidate in candidates:
+        activity = candidate.get("active_check") or {}
+        price = candidate.get("price_chf")
+        if activity.get("active") is False:
+            continue
+        if price is not None and float(price) > float(budget_chf):
+            continue
+        filtered_candidates.append(candidate)
+    candidates = filtered_candidates[:result_limit]
 
     if fetched_search_pages == 0:
         reason = rejected[0]["reason"] if rejected else "unknown error"
@@ -1087,6 +1297,7 @@ def fetch_ricardo_search(
         rejected=rejected,
         query_variants=query_variants,
         search_urls=search_urls,
+        enriched_count=enriched_count,
     )
     paths = {}
     if save:
@@ -1109,6 +1320,7 @@ def parse_ricardo_search(
     headless=False,
     result_limit=DEFAULT_SEARCH_RESULT_LIMIT,
     scan_limit=DEFAULT_SEARCH_SCAN_LIMIT,
+    enrich_limit=DEFAULT_SEARCH_ENRICH_LIMIT,
     save=True,
 ):
     _, payload, _ = fetch_ricardo_search(
@@ -1120,6 +1332,7 @@ def parse_ricardo_search(
         headless=headless,
         result_limit=result_limit,
         scan_limit=scan_limit,
+        enrich_limit=enrich_limit,
         save=save,
     )
     return payload

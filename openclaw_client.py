@@ -90,9 +90,11 @@ def build_find_agent_message(item_query, budget_chf, user_text, response_languag
         [
             "Prepare a concise Telegram answer from the provided Ricardo.ch search JSON.",
             "The bot parser already opened Ricardo live search results and candidate listing pages.",
+            "For non-German user requests, the parser searched German Ricardo query variants; use the original Telegram message only to understand intent and wording.",
             "Use only candidates from the provided JSON. Do not add links from web search or old indexed pages.",
             f"Return only the final Telegram-ready answer in {language_name}. Do not return JSON.",
-            "List 3-7 candidates when available, each with title, price, direct Ricardo.ch URL, and a short reason why it fits.",
+            "Select the best 5-8 candidates when available, each with title, price, direct Ricardo.ch URL, and a short reason why it fits.",
+            "Prefer gaming-relevant cards for gaming requests, and avoid candidates with risk_flags unless they are the only options.",
             "For auctions, mention that the current price may rise.",
             "If the candidates list is empty, say that no parser-verified active Ricardo listings were found under budget and suggest better search terms.",
             "Do not invent listings, prices, seller details, or URLs.",

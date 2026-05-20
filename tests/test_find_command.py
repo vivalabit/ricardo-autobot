@@ -6,6 +6,7 @@ from ricardo_parser import (
     build_ricardo_search_queries,
     build_ricardo_search_url,
     classify_listing_activity,
+    extract_search_card_candidates,
     extract_search_listing_urls,
 )
 
@@ -27,6 +28,12 @@ class FindCommandTest(unittest.TestCase):
         self.assertEqual(
             parse_find_argument("macbook pro 1'200 CHF"),
             {"item_query": "macbook pro", "budget_chf": 1200},
+        )
+
+    def test_parses_budget_range_as_upper_budget(self):
+        self.assertEqual(
+            parse_find_argument("Видеокарта для игр 350-500 франков"),
+            {"item_query": "Видеокарта для игр", "budget_chf": 500},
         )
 
     def test_parses_swiss_price_suffix(self):
@@ -60,7 +67,27 @@ class FindCommandTest(unittest.TestCase):
     def test_builds_translated_search_queries_for_russian_item(self):
         self.assertEqual(
             build_ricardo_search_queries("видеокарту RTX 4070"),
-            ["видеокарту RTX 4070", "grafikkarte RTX 4070", "gpu RTX 4070", "RTX 4070"],
+            [
+                "grafikkarte RTX 4070",
+                "RTX 4070 grafikkarte",
+                "grafikkarte",
+                "gpu RTX 4070",
+                "RTX 4070 gpu",
+                "gpu",
+            ],
+        )
+
+    def test_builds_german_only_search_queries_for_russian_gaming_item(self):
+        self.assertEqual(
+            build_ricardo_search_queries("Видеокарта для игр"),
+            [
+                "grafikkarte gaming",
+                "gaming grafikkarte",
+                "grafikkarte",
+                "gpu gaming",
+                "gaming gpu",
+                "gpu",
+            ],
         )
 
     def test_extracts_listing_urls_from_search_html(self):
@@ -74,6 +101,65 @@ class FindCommandTest(unittest.TestCase):
             extract_search_listing_urls(html, "https://www.ricardo.ch/de/s/RTX%204070/"),
             ["https://www.ricardo.ch/de/a/rtx-4070-gigabyte-1303611968/"],
         )
+
+    def test_extracts_search_card_candidate_from_search_html(self):
+        html = """
+        <a href="/de/a/gigabyte-geforce-rtx-3060-vision-oc-12g-lhr-1319456602/">
+          <img src="https://img.example/rtx3060.jpg" alt="Gigabyte GeForce RTX 3060 Vision OC 12G LHR">
+          <span>Gigabyte GeForce RTX 3060 Vision OC 12G LHR</span>
+          <span>| Nvidia</span>
+          <span>269.00 (0 Gebote)</span>
+          <span>399.00 Sofort kaufen</span>
+          <span>Fr, 22 Mai, 17:01</span>
+        </a>
+        """
+        self.assertEqual(
+            extract_search_card_candidates(html, "https://www.ricardo.ch/de/s/grafikkarte%20gaming/"),
+            [
+                {
+                    "listing_id": "1319456602",
+                    "title": "Gigabyte GeForce RTX 3060 Vision OC 12G LHR",
+                    "url": "https://www.ricardo.ch/de/a/gigabyte-geforce-rtx-3060-vision-oc-12g-lhr-1319456602/",
+                    "price_chf": 269.0,
+                    "buy_now_price_chf": 399.0,
+                    "auction_current_price_chf": 269.0,
+                    "auction_next_minimum_bid_chf": None,
+                    "sale_format": "auction_with_buy_now",
+                    "condition": None,
+                    "location": None,
+                    "shipping_cost_chf": None,
+                    "shipping": None,
+                    "pickup_only": None,
+                    "seller": None,
+                    "seller_rating_percent": None,
+                    "seller_sales_count": None,
+                    "bid_count": 0,
+                    "auction_end_at": None,
+                    "active_check": {
+                        "active": True,
+                        "confidence": "search_page",
+                        "has_action_signal": True,
+                        "reasons": [],
+                    },
+                    "risk_flags": [],
+                    "description_excerpt": "Nvidia 269.00 (0 Gebote) 399.00 Sofort kaufen Fr, 22 Mai, 17:01",
+                    "primary_image_url": "https://img.example/rtx3060.jpg",
+                    "matched_search_query": None,
+                    "candidate_source": "search_page_card",
+                }
+            ],
+        )
+
+    def test_marks_risky_search_card_candidate(self):
+        html = """
+        <a href="/de/a/gtx-1060-6gb-defekter-luefter-1319875656/">
+          <img src="https://img.example/gtx1060.jpg" alt="GTX 1060 6GB - defekter Lüfter">
+          <span>GTX 1060 6GB - defekter Lüfter</span>
+          <span>2.00 (0 Gebote)</span>
+        </a>
+        """
+        candidate = extract_search_card_candidates(html)[0]
+        self.assertEqual(candidate["risk_flags"], ["defekt"])
 
     def test_french_sale_description_is_not_closed_status(self):
         activity = classify_listing_activity(
