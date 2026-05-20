@@ -8,7 +8,31 @@ from ricardo_parser import (
     classify_listing_activity,
     extract_search_card_candidates,
     extract_search_listing_urls,
+    fetch_ricardo_search,
 )
+import ricardo_parser
+
+
+class FakeSearchPage:
+    status = 404
+    url = "https://www.ricardo.ch/de/s/unknown/"
+    html_content = "<html><title>Not found</title></html>"
+
+
+class Always404Session:
+    def __init__(self, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def fetch(self, url, google_search=False):
+        page = FakeSearchPage()
+        page.url = url
+        return page
 
 
 class FindCommandTest(unittest.TestCase):
@@ -178,6 +202,19 @@ class FindCommandTest(unittest.TestCase):
         """
         candidate = extract_search_card_candidates(html)[0]
         self.assertEqual(candidate["risk_flags"], ["defekt"])
+
+    def test_search_returns_empty_payload_when_all_search_pages_404(self):
+        original_session = ricardo_parser.StealthySession
+        ricardo_parser.StealthySession = Always404Session
+        try:
+            _, payload, _ = fetch_ricardo_search("RTX 4070", save=False)
+        finally:
+            ricardo_parser.StealthySession = original_session
+
+        self.assertEqual(payload["search"]["fetch_error"], "all_search_pages_failed")
+        self.assertEqual(payload["search"]["result_count"], 0)
+        self.assertEqual(payload["candidates"], [])
+        self.assertTrue(payload["rejected"])
 
     def test_french_sale_description_is_not_closed_status(self):
         activity = classify_listing_activity(

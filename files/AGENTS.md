@@ -39,7 +39,7 @@ For a search request (`schema: openclaw.ricardo.search.v1`):
 - Prefer clearly relevant listings with transparent price, condition, seller/location, and shipping details.
 - Only include listings marked active by the parser.
 - For auctions, mention that the final price may rise and avoid presenting the current bid as guaranteed final price.
-- Do not invent listings or links. If the candidates list is empty, say that no parser-verified active Ricardo listings were found and suggest better search terms.
+- Do not invent listings or links. If `fetch_error` is present or the candidates list is empty, say that no parser-verified active Ricardo listings were found and suggest better German search terms.
 - Keep the search response concise and practical for Telegram.
 
 Do not return JSON to the user. Return the finished Telegram text.

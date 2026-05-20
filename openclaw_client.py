@@ -95,6 +95,7 @@ def build_find_agent_message(item_query, budget_chf=None, user_text="", response
         "query_variants": search.get("query_variants") or [],
         "parser_result_count": search.get("result_count"),
         "parser_scanned_listing_count": search.get("scanned_listing_count"),
+        "parser_fetch_error": search.get("fetch_error"),
         "current_date": date.today().isoformat(),
         "response_language": language_name,
     }
@@ -110,7 +111,7 @@ def build_find_agent_message(item_query, budget_chf=None, user_text="", response
             "If min_price_chf or max_price_chf is present, treat it as the user's intended price range. If no price is present, choose broadly interesting deals.",
             "Prefer gaming-relevant cards for gaming requests, and avoid candidates with risk_flags unless they are the only options.",
             "For auctions, mention that the current price may rise.",
-            "If the candidates list is empty, say that no parser-verified active Ricardo listings were found and suggest better search terms.",
+            "If fetch_error is present or the candidates list is empty, say that no parser-verified active Ricardo listings were found and suggest better German search terms.",
             "Do not invent listings, prices, seller details, or URLs.",
             "",
             "Request context:",

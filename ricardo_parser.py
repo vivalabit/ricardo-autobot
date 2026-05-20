@@ -1152,6 +1152,7 @@ def build_openclaw_search_payload(
     query_variants=None,
     search_urls=None,
     enriched_count=0,
+    fetch_error=None,
 ):
     return {
         "schema": "openclaw.ricardo.search.v1",
@@ -1171,6 +1172,7 @@ def build_openclaw_search_payload(
             "scanned_listing_count": scanned_count,
             "result_count": len(candidates),
             "enriched_listing_count": enriched_count,
+            "fetch_error": fetch_error,
         },
         "candidates": candidates,
         "rejected": (rejected or [])[:10],
@@ -1309,10 +1311,6 @@ def fetch_ricardo_search(
         filtered_candidates.append(candidate)
     candidates = filtered_candidates[:result_limit]
 
-    if fetched_search_pages == 0:
-        reason = rejected[0]["reason"] if rejected else "unknown error"
-        raise RuntimeError(f"Ricardo search pages could not be fetched: {reason}")
-
     payload = build_openclaw_search_payload(
         query,
         max_price_chf,
@@ -1324,6 +1322,7 @@ def fetch_ricardo_search(
         query_variants=query_variants,
         search_urls=search_urls,
         enriched_count=enriched_count,
+        fetch_error="all_search_pages_failed" if fetched_search_pages == 0 else None,
     )
     paths = {}
     if save:
