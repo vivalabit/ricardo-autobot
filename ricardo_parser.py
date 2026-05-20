@@ -4,7 +4,7 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from scrapling.fetchers import StealthySession
@@ -14,7 +14,20 @@ from settings import get_proxy_from_env
 DEFAULT_OUTPUT_DIR = Path("data/openclaw")
 DEFAULT_RAW_DIR = Path("data/raw")
 MAX_BID_HISTORY = 10
+DEFAULT_SEARCH_RESULT_LIMIT = 7
+DEFAULT_SEARCH_SCAN_LIMIT = 30
 SHIPPING_METHOD_KEYWORDS = ["versand", "postversand", "paket", "porto", "kurier", "sperrgut"]
+SEARCH_QUERY_ALIASES = [
+    (r"\b(?:видео\s*карт\w*|видеокарт\w*|графическ\w*\s+карт\w*)\b", ["grafikkarte", "gpu"]),
+    (r"\b(?:ноутбук\w*|лэптоп\w*)\b", ["laptop", "notebook"]),
+    (r"\b(?:телефон\w*|смартфон\w*)\b", ["smartphone", "handy"]),
+    (r"\b(?:наушник\w*|гарнитур\w*)\b", ["kopfhörer", "headphones"]),
+    (r"\bмонитор\w*\b", ["monitor"]),
+    (r"\b(?:велосипед\w*|велик\w*)\b", ["velo", "fahrrad"]),
+    (r"\bпылесос\w*\b", ["staubsauger"]),
+    (r"\b(?:камер\w*|фотоаппарат\w*)\b", ["kamera"]),
+    (r"\bчас\w*\b", ["uhr"]),
+]
 
 
 def get_meta(soup, *, name=None, property_=None):
@@ -154,6 +167,58 @@ def parse_listing_id(page_url):
         return match.group(1)
 
     return re.sub(r"\W+", "-", path.strip("/")).strip("-") or "ricardo-item"
+
+
+def build_ricardo_search_url(query, language="de"):
+    language = language if language in {"de", "fr", "it", "en"} else "de"
+    return f"https://www.ricardo.ch/{language}/s/{quote(clean(query) or '', safe='')}/"
+
+
+def append_unique(values, value):
+    value = clean(value)
+    if value and value not in values:
+        values.append(value)
+
+
+def build_ricardo_search_queries(query):
+    cleaned = clean(query) or ""
+    variants = []
+    append_unique(variants, cleaned)
+
+    for pattern, aliases in SEARCH_QUERY_ALIASES:
+        if not re.search(pattern, cleaned, flags=re.IGNORECASE):
+            continue
+
+        remainder = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+        remainder = clean(remainder.strip(" ,;:-"))
+        for alias in aliases:
+            append_unique(variants, f"{alias} {remainder}" if remainder else alias)
+        append_unique(variants, remainder)
+
+    return variants
+
+
+def extract_search_listing_urls(html, base_url="https://www.ricardo.ch/"):
+    soup = BeautifulSoup(html or "", "html.parser")
+    urls = []
+    seen = set()
+
+    for link in soup.find_all("a", href=True):
+        absolute_url = urljoin(base_url, link.get("href"))
+        parsed = urlparse(absolute_url)
+        if not parsed.netloc.endswith("ricardo.ch"):
+            continue
+        if not re.search(r"/(?:de|fr|it|en)/a/.+-\d{6,}/?$", parsed.path):
+            continue
+
+        normalized = parsed._replace(query="", fragment="").geturl()
+        if normalized in seen:
+            continue
+
+        seen.add(normalized)
+        urls.append(normalized)
+
+    return urls
 
 
 def extract_line_after(lines, keywords):
@@ -777,6 +842,287 @@ def parse_ricardo_page(html, page_url):
             data["category"] = lines[i + 1] if i + 1 < len(lines) else line
 
     return data
+
+
+def parse_iso_datetime(value):
+    if not value:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def listing_budget_price(item):
+    return (
+        item.get("current_price_chf")
+        or item.get("buy_now_price_chf")
+        or item.get("auction_current_price_chf")
+        or item.get("auction_start_price_chf")
+    )
+
+
+def classify_listing_activity(item, html, *, from_live_search=False):
+    text = BeautifulSoup(html or "", "html.parser").get_text("\n", strip=True)
+    low = text.lower()
+    reasons = []
+    has_action = any(
+        term in low
+        for term in [
+            "sofort kaufen",
+            "bieten",
+            "preis vorschlagen",
+            "acheter maintenant",
+            "faire une offre",
+            "fai un'offerta",
+        ]
+    )
+    inactive_terms = [
+        "angebot beendet",
+        "auktion beendet",
+        "dieser artikel ist nicht mehr verfügbar",
+        "artikel ist nicht mehr verfügbar",
+        "article n'est plus disponible",
+        "annonce terminée",
+        "vente terminée",
+        "non più disponibile",
+        "vendita terminata",
+    ]
+
+    if any(term in low for term in inactive_terms):
+        reasons.append("inactive_text")
+
+    ended_at = parse_iso_datetime(item.get("auction_end_at"))
+    if ended_at:
+        now = datetime.now(ended_at.tzinfo) if ended_at.tzinfo else datetime.now()
+        if ended_at < now:
+            reasons.append("past_end_date")
+
+    if re.search(r"\b0\s+offene(?:s|n)?\s+angebote\b", low) and not has_action:
+        reasons.append("seller_has_zero_open_offers")
+
+    return {
+        "active": not reasons,
+        "confidence": "action_button" if has_action else ("live_search" if from_live_search and not reasons else "low"),
+        "has_action_signal": has_action,
+        "reasons": reasons,
+    }
+
+
+def build_search_candidate(item, activity):
+    description = clean(item.get("description")) or ""
+    if len(description) > 260:
+        description = f"{description[:257].rstrip()}..."
+
+    return {
+        "listing_id": item.get("listing_id"),
+        "title": item.get("title"),
+        "url": item.get("source_url"),
+        "price_chf": listing_budget_price(item),
+        "buy_now_price_chf": item.get("buy_now_price_chf"),
+        "auction_current_price_chf": item.get("auction_current_price_chf"),
+        "auction_next_minimum_bid_chf": item.get("auction_next_minimum_bid_chf"),
+        "sale_format": item.get("sale_format"),
+        "condition": item.get("condition"),
+        "location": item.get("location"),
+        "shipping_cost_chf": item.get("shipping_cost_chf"),
+        "shipping": item.get("shipping"),
+        "pickup_only": item.get("pickup_only"),
+        "seller": item.get("seller"),
+        "seller_rating_percent": item.get("seller_rating_percent"),
+        "seller_sales_count": item.get("seller_sales_count"),
+        "bid_count": item.get("bid_count"),
+        "auction_end_at": item.get("auction_end_at"),
+        "active_check": activity,
+        "description_excerpt": description,
+    }
+
+
+def build_openclaw_search_payload(
+    query,
+    budget_chf,
+    search_url,
+    candidates,
+    *,
+    scanned_count,
+    rejected=None,
+    query_variants=None,
+    search_urls=None,
+):
+    return {
+        "schema": "openclaw.ricardo.search.v1",
+        "source": {
+            "provider": "ricardo",
+            "url": search_url,
+            "parsed_at": datetime.now().isoformat(timespec="seconds"),
+        },
+        "search": {
+            "query": query,
+            "max_budget_chf": budget_chf,
+            "search_url": search_url,
+            "query_variants": query_variants or [query],
+            "search_urls": search_urls or [search_url],
+            "scanned_listing_count": scanned_count,
+            "result_count": len(candidates),
+        },
+        "candidates": candidates,
+        "rejected": (rejected or [])[:10],
+    }
+
+
+def fetch_ricardo_search(
+    query,
+    budget_chf,
+    *,
+    proxy=None,
+    output_dir=DEFAULT_OUTPUT_DIR,
+    raw_dir=DEFAULT_RAW_DIR,
+    headless=False,
+    result_limit=DEFAULT_SEARCH_RESULT_LIMIT,
+    scan_limit=DEFAULT_SEARCH_SCAN_LIMIT,
+    save=True,
+):
+    query_variants = build_ricardo_search_queries(query)
+    search_urls = [build_ricardo_search_url(search_query) for search_query in query_variants]
+    search_url = search_urls[0]
+    logging.info("Starting browser session")
+
+    session_kwargs = {
+        "headless": headless,
+        "solve_cloudflare": True,
+    }
+    if proxy is None:
+        proxy = get_proxy_from_env()
+    if proxy:
+        session_kwargs["proxy"] = proxy
+
+    candidates = []
+    rejected = []
+    scanned_count = 0
+    seen_listing_urls = set()
+    fetched_search_pages = 0
+
+    with StealthySession(**session_kwargs) as session:
+        for search_query, current_search_url in zip(query_variants, search_urls):
+            if len(candidates) >= result_limit or scanned_count >= scan_limit:
+                break
+
+            logging.info("Fetching Ricardo search page: %s", current_search_url)
+            try:
+                page = session.fetch(current_search_url, google_search=False)
+                logging.info("Fetched search page")
+                logging.info("Status: %s", page.status)
+                logging.info("Final URL: %s", page.url)
+
+                html = str(page.html_content)
+                ensure_fetchable_page(page, html)
+            except Exception as exc:
+                logging.warning("Failed to fetch Ricardo search page %s: %s", current_search_url, exc)
+                rejected.append({"url": current_search_url, "reason": str(exc)[:180], "search_query": search_query})
+                continue
+
+            fetched_search_pages += 1
+
+            if save:
+                raw_dir.mkdir(parents=True, exist_ok=True)
+                search_slug = re.sub(r"\W+", "-", clean(search_query) or "search").strip("-") or "search"
+                raw_path = raw_dir / f"ricardo_search_{search_slug[:80]}.html"
+                raw_path.write_text(html, encoding="utf-8")
+
+            listing_urls = extract_search_listing_urls(html, page.url)
+            logging.info("Found %s listing URLs in search page", len(listing_urls))
+
+            for listing_url in listing_urls:
+                if len(candidates) >= result_limit or scanned_count >= scan_limit:
+                    break
+                if listing_url in seen_listing_urls:
+                    continue
+
+                seen_listing_urls.add(listing_url)
+                scanned_count += 1
+
+                try:
+                    lot_page = session.fetch(listing_url, google_search=False)
+                    lot_html = str(lot_page.html_content)
+                    ensure_fetchable_page(lot_page, lot_html)
+                    item = parse_ricardo_page(lot_html, lot_page.url)
+                    activity = classify_listing_activity(item, lot_html, from_live_search=True)
+                    price = listing_budget_price(item)
+
+                    if not activity["active"]:
+                        rejected.append({"url": lot_page.url, "reason": ",".join(activity["reasons"])})
+                        continue
+                    if price is None:
+                        rejected.append({"url": lot_page.url, "reason": "missing_price"})
+                        continue
+                    if float(price) > float(budget_chf):
+                        rejected.append({"url": lot_page.url, "reason": "over_budget", "price_chf": price})
+                        continue
+
+                    candidate = build_search_candidate(item, activity)
+                    candidate["matched_search_query"] = search_query
+                    candidates.append(candidate)
+                except Exception as exc:
+                    logging.warning("Failed to parse search candidate %s: %s", listing_url, exc)
+                    rejected.append({"url": listing_url, "reason": str(exc)[:180]})
+
+    if fetched_search_pages == 0:
+        reason = rejected[0]["reason"] if rejected else "unknown error"
+        raise RuntimeError(f"Ricardo search pages could not be fetched: {reason}")
+
+    payload = build_openclaw_search_payload(
+        query,
+        budget_chf,
+        search_url,
+        candidates,
+        scanned_count=scanned_count,
+        rejected=rejected,
+        query_variants=query_variants,
+        search_urls=search_urls,
+    )
+    paths = {}
+    if save:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        search_slug = re.sub(r"\W+", "-", clean(query) or "search").strip("-") or "search"
+        output_path = output_dir / f"openclaw_search_{search_slug[:80]}.json"
+        write_json(output_path, payload)
+        paths["openclaw_search_json"] = output_path
+
+    return candidates, payload, paths
+
+
+def parse_ricardo_search(
+    query,
+    budget_chf,
+    *,
+    proxy=None,
+    output_dir=DEFAULT_OUTPUT_DIR,
+    raw_dir=DEFAULT_RAW_DIR,
+    headless=False,
+    result_limit=DEFAULT_SEARCH_RESULT_LIMIT,
+    scan_limit=DEFAULT_SEARCH_SCAN_LIMIT,
+    save=True,
+):
+    _, payload, _ = fetch_ricardo_search(
+        query,
+        budget_chf,
+        proxy=proxy,
+        output_dir=output_dir,
+        raw_dir=raw_dir,
+        headless=headless,
+        result_limit=result_limit,
+        scan_limit=scan_limit,
+        save=save,
+    )
+    return payload
 
 
 def ensure_fetchable_page(page, html):

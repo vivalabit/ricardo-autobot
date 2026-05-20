@@ -4,7 +4,9 @@ import re
 import shlex
 import subprocess
 import time
+from datetime import date
 from pathlib import Path
+from urllib.parse import quote
 
 from settings import ROOT_DIR, env_flag, env_int, language_label
 
@@ -40,6 +42,66 @@ def build_agent_message(payload, user_text, check_argument, response_language):
             "",
             "Lot JSON:",
             json.dumps({"source": source, "lot": lot, "seller": payload.get("seller") or {}}, ensure_ascii=False, indent=2),
+        ]
+    )
+
+
+def build_find_payload(item_query, budget_chf, *, candidates=None, rejected=None):
+    search_url = f"https://www.ricardo.ch/de/s/{quote(item_query.strip(), safe='')}/"
+    return {
+        "schema": "openclaw.ricardo.search.v1",
+        "source": {
+            "provider": "ricardo",
+            "url": search_url,
+            "parsed_at": date.today().isoformat(),
+        },
+        "search": {
+            "query": item_query,
+            "max_budget_chf": budget_chf,
+            "search_url": search_url,
+            "result_count": len(candidates or []),
+        },
+        "candidates": candidates or [],
+        "rejected": rejected or [],
+    }
+
+
+def build_find_agent_message(item_query, budget_chf, user_text, response_language, payload=None):
+    if payload is None:
+        payload = build_find_payload(item_query, budget_chf)
+
+    language_name = language_label(response_language)
+    search = payload.get("search") or {}
+    request_context = {
+        "telegram_message": user_text,
+        "command": "find",
+        "item_query": search.get("query") or item_query,
+        "max_budget_chf": search.get("max_budget_chf") or budget_chf,
+        "ricardo_search_url": search.get("search_url") or f"https://www.ricardo.ch/de/s/{quote(item_query.strip(), safe='')}/",
+        "ricardo_search_urls": search.get("search_urls") or [],
+        "query_variants": search.get("query_variants") or [],
+        "parser_result_count": search.get("result_count"),
+        "parser_scanned_listing_count": search.get("scanned_listing_count"),
+        "current_date": date.today().isoformat(),
+        "response_language": language_name,
+    }
+
+    return "\n".join(
+        [
+            "Prepare a concise Telegram answer from the provided Ricardo.ch search JSON.",
+            "The bot parser already opened Ricardo live search results and candidate listing pages.",
+            "Use only candidates from the provided JSON. Do not add links from web search or old indexed pages.",
+            f"Return only the final Telegram-ready answer in {language_name}. Do not return JSON.",
+            "List 3-7 candidates when available, each with title, price, direct Ricardo.ch URL, and a short reason why it fits.",
+            "For auctions, mention that the current price may rise.",
+            "If the candidates list is empty, say that no parser-verified active Ricardo listings were found under budget and suggest better search terms.",
+            "Do not invent listings, prices, seller details, or URLs.",
+            "",
+            "Request context:",
+            json.dumps(request_context, ensure_ascii=False, indent=2),
+            "",
+            "Ricardo search JSON:",
+            json.dumps(payload, ensure_ascii=False, indent=2),
         ]
     )
 

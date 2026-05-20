@@ -15,6 +15,7 @@ The assistant communicates with users through Telegram: users send Ricardo listi
 ## Bot Commands
 
 - `/check <ricardo_lot_link> [min_profit=30] [max_price=180]` - check a specific listing.
+- `/find <item> <budget>` - parse live Ricardo.ch search results and return several active listings within a CHF budget, for example `/find видеокарту до 500 франков`.
 - `/language` or `/lang` - choose the answer language with buttons.
 - `/language <code>` or `/lang <code>` - set the answer language. Supported codes: `en`, `ru`, `de`, `fr`, `it`, `es`.
 - `/settings` - show current chat settings.

@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from openclaw_client import (
     agent_reply_text,
     build_agent_message,
+    build_find_agent_message,
     run_openclaw_agent,
     should_send_agent_reply,
 )
@@ -26,6 +27,14 @@ from settings import (
 
 RICARDO_URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 CHECK_COMMAND_RE = re.compile(r"^\s*/check(?:@\w+)?(?:\s+(.*))?$", re.IGNORECASE)
+FIND_COMMAND_RE = re.compile(r"^\s*/find(?:@\w+)?(?:\s+(.*))?$", re.IGNORECASE)
+FIND_BUDGET_RE = re.compile(
+    r"(?P<marker>(?:до|макс(?:имум)?|max(?:imum)?|under|up\s+to|<=|bis|unter|for|für|pour|jusqu[’']?a|jusqu[’']?à|moins\s+de)\s+)?"
+    r"(?P<currency_before>(?:chf|sfr|francs?|franken|frs?\.?|франк(?:ов|а|и)?)\s+)?"
+    r"(?P<amount>(?:\d{1,3}(?:[\s'’.,]\d{3})+|\d+(?:[.,]\d+)?))"
+    r"(?:\s*(?P<currency_after>chf|sfr|francs?|franken|frs?\.?|франк(?:ов|а|и)?|\.-))?",
+    re.IGNORECASE,
+)
 LANGUAGE_COMMAND_RE = re.compile(r"^\s*/(?:lang|language)(?:@\w+)?(?:\s+(.*))?$", re.IGNORECASE)
 HELP_COMMAND_RE = re.compile(r"^\s*/(?:start|help)(?:@\w+)?\s*$", re.IGNORECASE)
 SETTINGS_COMMAND_RE = re.compile(r"^\s*/settings(?:@\w+)?\s*$", re.IGNORECASE)
@@ -49,6 +58,58 @@ def extract_check_argument(text):
 
 def is_check_command(text):
     return bool(re.match(r"^\s*/check(?:@\w+)?(?:\s|$)", text or "", re.IGNORECASE))
+
+
+def extract_find_argument(text):
+    match = FIND_COMMAND_RE.match(text or "")
+    return match.group(1).strip() if match and match.group(1) else ""
+
+
+def is_find_command(text):
+    return bool(re.match(r"^\s*/find(?:@\w+)?(?:\s|$)", text or "", re.IGNORECASE))
+
+
+def parse_budget_amount(value):
+    normalized = str(value or "").strip().replace("'", "").replace("’", "").replace(" ", "")
+    if re.fullmatch(r"\d{1,3}([.,]\d{3})+", normalized):
+        normalized = re.sub(r"[.,]", "", normalized)
+    elif "," in normalized and "." not in normalized:
+        normalized = normalized.replace(",", ".")
+
+    try:
+        amount = float(normalized)
+    except ValueError:
+        return None
+
+    if amount <= 0:
+        return None
+
+    return int(round(amount))
+
+
+def parse_find_argument(argument):
+    cleaned = re.sub(r"\s+", " ", (argument or "").strip())
+    if not cleaned:
+        return None
+
+    budget_match = None
+    for match in FIND_BUDGET_RE.finditer(cleaned):
+        budget = parse_budget_amount(match.group("amount"))
+        if not budget:
+            continue
+        budget_match = match
+
+    if not budget_match:
+        return None
+
+    budget = parse_budget_amount(budget_match.group("amount"))
+    item_query = f"{cleaned[:budget_match.start()]} {cleaned[budget_match.end():]}".strip(" ,;:-")
+    item_query = re.sub(r"\s+", " ", item_query).strip()
+
+    if not item_query:
+        return None
+
+    return {"item_query": item_query, "budget_chf": budget}
 
 
 def is_language_command(text):
@@ -134,6 +195,7 @@ def answer_callback_query(token, callback_query_id, text=None, show_alert=False)
 def set_bot_commands(token):
     commands = [
         {"command": "check", "description": "Check a Ricardo.ch lot"},
+        {"command": "find", "description": "Find Ricardo.ch items under budget"},
         {"command": "language", "description": "Choose answer language"},
         {"command": "settings", "description": "Show current settings"},
         {"command": "help", "description": "Show help"},
@@ -168,6 +230,12 @@ def run_parser(url):
     return parse_ricardo_url(url, headless=True)
 
 
+def run_search_parser(item_query, budget_chf):
+    from ricardo_parser import parse_ricardo_search
+
+    return parse_ricardo_search(item_query, budget_chf, headless=True)
+
+
 def format_error(prefix, exc):
     message = str(exc).strip() or exc.__class__.__name__
     return f"{prefix}: {message[:500]}"
@@ -200,6 +268,7 @@ def help_text(chat_id):
             "",
             "Commands:",
             "/check <ricardo_lot_link> [min_profit=30] [max_price=180]",
+            "/find <item> <budget>",
             "/language - choose answer language",
             "/settings - show current settings",
             "/help - show this help",
@@ -237,6 +306,7 @@ def settings_text(chat_id):
             "",
             "Change language with the buttons below or /language <code>.",
             "Run checks with /check <ricardo_lot_link> [min_profit=30] [max_price=180].",
+            "Find items with /find <item> <budget>, for example /find видеокарту до 500 франков.",
         ]
     )
 
@@ -252,12 +322,35 @@ def check_usage_text():
     )
 
 
+def find_usage_text():
+    return "\n".join(
+        [
+            "Use:",
+            "/find <item> <budget>",
+            "",
+            "Examples:",
+            "/find видеокарту до 500 франков",
+            "/find RTX 4070 500 CHF",
+        ]
+    )
+
+
 def check_progress_text(step):
     messages = {
         "parsing": "Processing Ricardo lot...\n\n[1/3] Reading the lot page.",
         "analyzing": "Processing Ricardo lot...\n\n[2/3] Running resale analysis and market research.",
         "finalizing": "Processing Ricardo lot...\n\n[3/3] Preparing the Telegram answer.",
         "delivered": "Analysis finished. OpenClaw sent the answer to this chat.",
+    }
+    return messages[step]
+
+
+def find_progress_text(step):
+    messages = {
+        "searching": "Searching Ricardo...\n\n[1/3] Reading live Ricardo search results.",
+        "analyzing": "Searching Ricardo...\n\n[2/3] Preparing links and short descriptions.",
+        "finalizing": "Searching Ricardo...\n\n[3/3] Preparing the Telegram answer.",
+        "delivered": "Search finished. OpenClaw sent the answer to this chat.",
     }
     return messages[step]
 
@@ -311,6 +404,80 @@ def handle_message(token, message):
             message_id,
             language_keyboard(language_choice),
         )
+        return
+
+    if is_find_command(text):
+        find_request = parse_find_argument(extract_find_argument(text))
+        if not find_request:
+            send_message(token, chat_id, find_usage_text(), message_id)
+            return
+
+        item_query = find_request["item_query"]
+        budget_chf = find_request["budget_chf"]
+
+        send_chat_action(token, chat_id)
+        progress_message = send_message(token, chat_id, find_progress_text("searching"), message_id)
+        status_message_id = progress_message_id(progress_message)
+
+        try:
+            payload = run_search_parser(item_query, budget_chf)
+        except Exception as exc:
+            logging.exception("Failed to parse Ricardo search: query=%s budget=%s", item_query, budget_chf)
+            send_or_edit_message(
+                token,
+                chat_id,
+                status_message_id,
+                format_error("Failed to search live Ricardo listings", exc),
+                message_id,
+            )
+            return
+
+        send_chat_action(token, chat_id)
+        safe_edit_message_text(token, chat_id, status_message_id, find_progress_text("analyzing"))
+
+        try:
+            agent_result = run_openclaw_agent(
+                build_find_agent_message(item_query, budget_chf, text, get_chat_language(chat_id), payload),
+                chat_id=chat_id,
+                message_id=message_id,
+                payload=payload,
+            )
+        except Exception as exc:
+            logging.exception("OpenClaw agent failed during Ricardo search")
+            send_or_edit_message(
+                token,
+                chat_id,
+                status_message_id,
+                format_error("OpenClaw agent failed to search Ricardo", exc),
+                message_id,
+            )
+            return
+
+        safe_edit_message_text(token, chat_id, status_message_id, find_progress_text("finalizing"))
+
+        if should_send_agent_reply(agent_result):
+            reply_text = agent_reply_text(agent_result)
+            if reply_text:
+                send_or_edit_message(token, chat_id, status_message_id, reply_text, message_id)
+            else:
+                session_id = agent_result.get("_openclaw_session_id") or "unknown"
+                transcript_path = agent_result.get("_openclaw_transcript_path") or "unknown"
+                logging.warning(
+                    "OpenClaw returned no visible search text: session_id=%s transcript=%s",
+                    session_id,
+                    transcript_path,
+                )
+                send_or_edit_message(
+                    token,
+                    chat_id,
+                    status_message_id,
+                    "OpenClaw finished without visible reply text. "
+                    f"session_id={session_id}",
+                    message_id,
+                )
+        else:
+            send_or_edit_message(token, chat_id, status_message_id, find_progress_text("delivered"), message_id)
+
         return
 
     if is_check_command(text):
