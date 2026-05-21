@@ -123,6 +123,71 @@ def build_find_agent_message(item_query, budget_chf=None, user_text="", response
     )
 
 
+def build_question_payload(question, user_text="", response_language=None, context=None):
+    context = context if isinstance(context, dict) else None
+    context_payload = context.get("payload") if context else None
+    context_source = (context_payload or {}).get("source") if isinstance(context_payload, dict) else {}
+    language_name = language_label(response_language)
+
+    source = {
+        "provider": "telegram",
+        "parsed_at": date.today().isoformat(),
+        "context_kind": context.get("kind") if context else None,
+        "context_saved_at": context.get("saved_at") if context else None,
+    }
+    if isinstance(context_source, dict):
+        if context_source.get("url"):
+            source["url"] = context_source["url"]
+        if context_source.get("listing_id"):
+            source["listing_id"] = context_source["listing_id"]
+
+    return {
+        "schema": "openclaw.ricardo.question.v1",
+        "source": source,
+        "question": {
+            "text": question,
+            "telegram_message": user_text,
+            "current_date": date.today().isoformat(),
+            "response_language": language_name,
+        },
+        "recent_context": context,
+    }
+
+
+def build_question_agent_message(question, user_text="", response_language=None, context=None, payload=None):
+    if payload is None:
+        payload = build_question_payload(question, user_text, response_language, context)
+
+    language_name = language_label(response_language)
+    context_kind = ((payload.get("source") or {}).get("context_kind")) or "none"
+    request_context = {
+        "telegram_message": user_text,
+        "command": "question",
+        "question": question,
+        "recent_context_kind": context_kind,
+        "current_date": date.today().isoformat(),
+        "response_language": language_name,
+    }
+
+    return "\n".join(
+        [
+            "Answer the user's question for Telegram.",
+            "If recent_context is present, use it only when the question refers to the current or recent Ricardo lot, search, or search results.",
+            "If the question is unrelated to the recent Ricardo context, answer it directly without forcing the context.",
+            "Use provided JSON as factual input. Do not invent missing facts, listings, prices, seller details, or URLs.",
+            "You may do web research when the answer needs current market information or external sources.",
+            f"Return only the final Telegram-ready answer in {language_name}. Do not return JSON.",
+            "Keep the answer concise and practical.",
+            "",
+            "Request context:",
+            json.dumps(request_context, ensure_ascii=False, indent=2),
+            "",
+            "Question JSON:",
+            json.dumps(payload, ensure_ascii=False, indent=2),
+        ]
+    )
+
+
 def openclaw_command_candidates():
     configured = os.getenv("OPENCLAW_AGENT_COMMAND") or os.getenv("OPENCLAW_BIN")
     if configured:

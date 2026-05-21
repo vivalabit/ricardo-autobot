@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 from urllib import error, parse, request
 from urllib.parse import urlparse
 
@@ -10,16 +11,20 @@ from openclaw_client import (
     agent_reply_text,
     build_agent_message,
     build_find_agent_message,
+    build_question_agent_message,
+    build_question_payload,
     run_openclaw_agent,
     should_send_agent_reply,
 )
 from settings import (
     LANGUAGE_LABELS,
     default_response_language,
+    get_chat_recent_context,
     get_chat_language,
     language_label,
     load_env_file,
     normalize_language,
+    set_chat_recent_context,
     set_chat_language,
     supported_language_text,
 )
@@ -28,6 +33,7 @@ from settings import (
 RICARDO_URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 CHECK_COMMAND_RE = re.compile(r"^\s*/check(?:@\w+)?(?:\s+(.*))?$", re.IGNORECASE)
 FIND_COMMAND_RE = re.compile(r"^\s*/find(?:@\w+)?(?:\s+(.*))?$", re.IGNORECASE)
+QUESTION_COMMAND_RE = re.compile(r"^\s*/question(?:@\w+)?(?:\s+(.*))?$", re.IGNORECASE)
 FIND_BUDGET_RANGE_RE = re.compile(
     r"(?P<low>\d[\d'’.,]*)\s*(?:-|–|—|to|bis|до)\s*"
     r"(?P<high>\d[\d'’.,]*)"
@@ -73,6 +79,15 @@ def extract_find_argument(text):
 
 def is_find_command(text):
     return bool(re.match(r"^\s*/find(?:@\w+)?(?:\s|$)", text or "", re.IGNORECASE))
+
+
+def extract_question_argument(text):
+    match = QUESTION_COMMAND_RE.match(text or "")
+    return match.group(1).strip() if match and match.group(1) else ""
+
+
+def is_question_command(text):
+    return bool(re.match(r"^\s*/question(?:@\w+)?(?:\s|$)", text or "", re.IGNORECASE))
 
 
 def parse_budget_amount(value):
@@ -236,6 +251,7 @@ def set_bot_commands(token):
     commands = [
         {"command": "check", "description": "Check a Ricardo.ch lot"},
         {"command": "find", "description": "Find Ricardo.ch items under budget"},
+        {"command": "question", "description": "Ask about the recent lot, search, or anything else"},
         {"command": "language", "description": "Choose answer language"},
         {"command": "settings", "description": "Show current settings"},
         {"command": "help", "description": "Show help"},
@@ -309,6 +325,7 @@ def help_text(chat_id):
             "Commands:",
             "/check <ricardo_lot_link> [min_profit=30] [max_price=180]",
             "/find <item> [price_or_range]",
+            "/question <question>",
             "/language - choose answer language",
             "/settings - show current settings",
             "/help - show this help",
@@ -347,6 +364,7 @@ def settings_text(chat_id):
             "Change language with the buttons below or /language <code>.",
             "Run checks with /check <ricardo_lot_link> [min_profit=30] [max_price=180].",
             "Find items with /find <item> [price_or_range], for example /find видеокарту до 500 франков.",
+            "Ask follow-up questions with /question <question>.",
         ]
     )
 
@@ -377,6 +395,20 @@ def find_usage_text():
     )
 
 
+def question_usage_text():
+    return "\n".join(
+        [
+            "Use:",
+            "/question <question>",
+            "",
+            "Examples:",
+            "/question Is this lot worth bidding on up to 200 CHF?",
+            "/question Which found option has the lowest risk?",
+            "/question What should I check before buying used electronics?",
+        ]
+    )
+
+
 def check_progress_text(step):
     messages = {
         "parsing": "Processing Ricardo lot...\n\n[1/3] Reading the lot page.",
@@ -395,6 +427,28 @@ def find_progress_text(step):
         "delivered": "Search finished. OpenClaw sent the answer to this chat.",
     }
     return messages[step]
+
+
+def question_progress_text(step):
+    messages = {
+        "answering": "Answering question...\n\n[1/2] Preparing recent context.",
+        "finalizing": "Answering question...\n\n[2/2] Preparing the Telegram answer.",
+        "delivered": "Question answered. OpenClaw sent the answer to this chat.",
+    }
+    return messages[step]
+
+
+def remember_chat_context(chat_id, kind, user_text, payload):
+    context = {
+        "kind": kind,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "telegram_message": user_text,
+        "payload": payload,
+    }
+    try:
+        set_chat_recent_context(chat_id, context)
+    except Exception:
+        logging.warning("Failed to save recent chat context: chat_id=%s kind=%s", chat_id, kind, exc_info=True)
 
 
 def handle_message(token, message):
@@ -448,6 +502,64 @@ def handle_message(token, message):
         )
         return
 
+    if is_question_command(text):
+        question = extract_question_argument(text)
+        if not question:
+            send_message(token, chat_id, question_usage_text(), message_id)
+            return
+
+        send_chat_action(token, chat_id)
+        progress_message = send_message(token, chat_id, question_progress_text("answering"), message_id)
+        status_message_id = progress_message_id(progress_message)
+        recent_context = get_chat_recent_context(chat_id)
+        response_language = get_chat_language(chat_id)
+        question_payload = build_question_payload(question, text, response_language, recent_context)
+
+        try:
+            agent_result = run_openclaw_agent(
+                build_question_agent_message(question, text, response_language, recent_context, question_payload),
+                chat_id=chat_id,
+                message_id=message_id,
+                payload=question_payload,
+            )
+        except Exception as exc:
+            logging.exception("OpenClaw agent failed during question answering")
+            send_or_edit_message(
+                token,
+                chat_id,
+                status_message_id,
+                format_error("OpenClaw agent failed to answer the question", exc),
+                message_id,
+            )
+            return
+
+        safe_edit_message_text(token, chat_id, status_message_id, question_progress_text("finalizing"))
+
+        if should_send_agent_reply(agent_result):
+            reply_text = agent_reply_text(agent_result)
+            if reply_text:
+                send_or_edit_message(token, chat_id, status_message_id, reply_text, message_id)
+            else:
+                session_id = agent_result.get("_openclaw_session_id") or "unknown"
+                transcript_path = agent_result.get("_openclaw_transcript_path") or "unknown"
+                logging.warning(
+                    "OpenClaw returned no visible question text: session_id=%s transcript=%s",
+                    session_id,
+                    transcript_path,
+                )
+                send_or_edit_message(
+                    token,
+                    chat_id,
+                    status_message_id,
+                    "OpenClaw finished without visible reply text. "
+                    f"session_id={session_id}",
+                    message_id,
+                )
+        else:
+            send_or_edit_message(token, chat_id, status_message_id, question_progress_text("delivered"), message_id)
+
+        return
+
     if is_find_command(text):
         find_request = parse_find_argument(extract_find_argument(text))
         if not find_request:
@@ -480,6 +592,8 @@ def handle_message(token, message):
                 message_id,
             )
             return
+
+        remember_chat_context(chat_id, "search", text, payload)
 
         send_chat_action(token, chat_id)
         safe_edit_message_text(token, chat_id, status_message_id, find_progress_text("analyzing"))
@@ -559,6 +673,8 @@ def handle_message(token, message):
             message_id,
         )
         return
+
+    remember_chat_context(chat_id, "lot", text, payload)
 
     send_chat_action(token, chat_id)
     safe_edit_message_text(token, chat_id, status_message_id, check_progress_text("analyzing"))

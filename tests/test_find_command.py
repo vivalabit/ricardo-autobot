@@ -1,7 +1,13 @@
 import unittest
 
-from bot import extract_find_argument, is_find_command, parse_find_argument
-from openclaw_client import build_find_payload
+from bot import (
+    extract_find_argument,
+    extract_question_argument,
+    is_find_command,
+    is_question_command,
+    parse_find_argument,
+)
+from openclaw_client import build_find_payload, build_question_agent_message, build_question_payload
 from ricardo_parser import (
     build_ricardo_search_queries,
     build_ricardo_search_url,
@@ -81,6 +87,38 @@ class FindCommandTest(unittest.TestCase):
     def test_parses_find_command_with_bot_username(self):
         self.assertTrue(is_find_command("/find@ricardo_resale_bot iphone 13 400 CHF"))
         self.assertEqual(extract_find_argument("/find@ricardo_resale_bot iphone 13 400 CHF"), "iphone 13 400 CHF")
+
+    def test_parses_question_command_with_bot_username(self):
+        self.assertTrue(is_question_command("/question@ricardo_resale_bot Is it risky?"))
+        self.assertEqual(extract_question_argument("/question@ricardo_resale_bot Is it risky?"), "Is it risky?")
+
+    def test_question_payload_preserves_recent_lot_context(self):
+        context = {
+            "kind": "lot",
+            "saved_at": "2026-05-21T10:00:00+00:00",
+            "telegram_message": "https://www.ricardo.ch/de/a/test-1234567890/",
+            "payload": {
+                "schema": "openclaw.ricardo.lot.v1",
+                "source": {
+                    "url": "https://www.ricardo.ch/de/a/test-1234567890/",
+                    "listing_id": "1234567890",
+                },
+                "lot": {"title": "Test lot"},
+            },
+        }
+
+        payload = build_question_payload("Is it risky?", "/question Is it risky?", "en", context)
+
+        self.assertEqual(payload["schema"], "openclaw.ricardo.question.v1")
+        self.assertEqual(payload["source"]["context_kind"], "lot")
+        self.assertEqual(payload["source"]["listing_id"], "1234567890")
+        self.assertEqual(payload["recent_context"], context)
+
+    def test_question_message_instructs_context_only_when_relevant(self):
+        message = build_question_agent_message("What is a fair bid?", response_language="en")
+
+        self.assertIn("use it only when the question refers", message)
+        self.assertIn("openclaw.ricardo.question.v1", message)
 
     def test_rejects_empty_find_argument(self):
         self.assertIsNone(parse_find_argument(""))

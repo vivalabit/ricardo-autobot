@@ -152,3 +152,18 @@ def set_chat_language(chat_id, language_code):
     chat_settings = chats.setdefault(str(chat_id), {})
     chat_settings["language"] = language_code
     save_bot_settings(settings)
+
+
+def get_chat_recent_context(chat_id):
+    settings = load_bot_settings()
+    chat_settings = (settings.get("chats") or {}).get(str(chat_id)) or {}
+    context = chat_settings.get("recent_context")
+    return context if isinstance(context, dict) else None
+
+
+def set_chat_recent_context(chat_id, context):
+    settings = load_bot_settings()
+    chats = settings.setdefault("chats", {})
+    chat_settings = chats.setdefault(str(chat_id), {})
+    chat_settings["recent_context"] = context
+    save_bot_settings(settings)
