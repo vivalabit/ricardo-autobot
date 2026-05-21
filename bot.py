@@ -47,6 +47,14 @@ FIND_BUDGET_RE = re.compile(
     r"(?:\s*(?P<currency_after>chf|sfr|francs?|franken|frs?\.?|франк(?:ов|а|и)?|\.-))?",
     re.IGNORECASE,
 )
+FIND_DELIVERY_ONLY_RE = re.compile(
+    r"(?:"
+    r"\b(?:only\s+(?:shipping|delivery)|(?:shipping|delivery)\s+only|with\s+(?:shipping|delivery))\b"
+    r"|\b(?:nur\s+versand|mit\s+versand)\b"
+    r"|(?:только\s+(?:с\s+)?доставк\w*|с\s+доставк\w*)"
+    r")",
+    re.IGNORECASE,
+)
 LANGUAGE_COMMAND_RE = re.compile(r"^\s*/(?:lang|language)(?:@\w+)?(?:\s+(.*))?$", re.IGNORECASE)
 HELP_COMMAND_RE = re.compile(r"^\s*/(?:start|help)(?:@\w+)?\s*$", re.IGNORECASE)
 SETTINGS_COMMAND_RE = re.compile(r"^\s*/settings(?:@\w+)?\s*$", re.IGNORECASE)
@@ -113,6 +121,13 @@ def parse_find_argument(argument):
     if not cleaned:
         return None
 
+    delivery_only = bool(FIND_DELIVERY_ONLY_RE.search(cleaned))
+    if delivery_only:
+        cleaned = FIND_DELIVERY_ONLY_RE.sub(" ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,;:-")
+        if not cleaned:
+            return None
+
     budget_range_match = None
     for match in FIND_BUDGET_RANGE_RE.finditer(cleaned):
         low_budget = parse_budget_amount(match.group("low"))
@@ -127,12 +142,15 @@ def parse_find_argument(argument):
         item_query = f"{cleaned[:budget_range_match.start()]} {cleaned[budget_range_match.end():]}".strip(" ,;:-")
         item_query = re.sub(r"\s+", " ", item_query).strip()
         if item_query:
-            return {
+            request = {
                 "item_query": item_query,
                 "budget_chf": max_price,
                 "min_price_chf": min_price,
                 "max_price_chf": max_price,
             }
+            if delivery_only:
+                request["delivery_only"] = True
+            return request
 
     budget_match = None
     for match in FIND_BUDGET_RE.finditer(cleaned):
@@ -150,21 +168,27 @@ def parse_find_argument(argument):
         item_query = re.sub(r"\s+", " ", item_query).strip()
 
         if item_query:
-            return {
+            request = {
                 "item_query": item_query,
                 "budget_chf": budget,
                 "min_price_chf": None,
                 "max_price_chf": budget,
             }
+            if delivery_only:
+                request["delivery_only"] = True
+            return request
 
     item_query = cleaned
 
-    return {
+    request = {
         "item_query": item_query,
         "budget_chf": None,
         "min_price_chf": None,
         "max_price_chf": None,
     }
+    if delivery_only:
+        request["delivery_only"] = True
+    return request
 
 
 def is_language_command(text):
@@ -286,10 +310,16 @@ def run_parser(url):
     return parse_ricardo_url(url, headless=True)
 
 
-def run_search_parser(item_query, max_price_chf=None, min_price_chf=None):
+def run_search_parser(item_query, max_price_chf=None, min_price_chf=None, delivery_only=False):
     from ricardo_parser import parse_ricardo_search
 
-    return parse_ricardo_search(item_query, max_price_chf, min_price_chf=min_price_chf, headless=True)
+    return parse_ricardo_search(
+        item_query,
+        max_price_chf,
+        min_price_chf=min_price_chf,
+        delivery_only=delivery_only,
+        headless=True,
+    )
 
 
 def format_error(prefix, exc):
@@ -324,7 +354,7 @@ def help_text(chat_id):
             "",
             "Commands:",
             "/check <ricardo_lot_link> [min_profit=30] [max_price=180]",
-            "/find <item> [price_or_range]",
+            "/find <item> [price_or_range] [только доставка]",
             "/question <question>",
             "/language - choose answer language",
             "/settings - show current settings",
@@ -390,6 +420,7 @@ def find_usage_text():
             "/find Видеокарта для игр",
             "/find видеокарту до 500 франков",
             "/find Видеокарта для игр 350-500 франков",
+            "/find dyson только доставка",
             "/find RTX 4070 500 CHF",
         ]
     )
@@ -570,19 +601,21 @@ def handle_message(token, message):
         budget_chf = find_request.get("budget_chf")
         min_price_chf = find_request.get("min_price_chf")
         max_price_chf = find_request.get("max_price_chf")
+        delivery_only = bool(find_request.get("delivery_only"))
 
         send_chat_action(token, chat_id)
         progress_message = send_message(token, chat_id, find_progress_text("searching"), message_id)
         status_message_id = progress_message_id(progress_message)
 
         try:
-            payload = run_search_parser(item_query, max_price_chf, min_price_chf)
+            payload = run_search_parser(item_query, max_price_chf, min_price_chf, delivery_only)
         except Exception as exc:
             logging.exception(
-                "Failed to parse Ricardo search: query=%s min_price=%s max_price=%s",
+                "Failed to parse Ricardo search: query=%s min_price=%s max_price=%s delivery_only=%s",
                 item_query,
                 min_price_chf,
                 max_price_chf,
+                delivery_only,
             )
             send_or_edit_message(
                 token,

@@ -17,6 +17,7 @@ MAX_BID_HISTORY = 10
 DEFAULT_SEARCH_RESULT_LIMIT = 15
 DEFAULT_SEARCH_SCAN_LIMIT = 60
 DEFAULT_SEARCH_ENRICH_LIMIT = 3
+RICARDO_DELIVERY_SHIPPING_FILTER = "shipping_cost,free"
 SHIPPING_METHOD_KEYWORDS = ["versand", "postversand", "paket", "porto", "kurier", "sperrgut"]
 SEARCH_QUERY_ALIASES = [
     (r"\b(?:видео\s*карт\w*|видеокарт\w*|графическ\w*\s+карт\w*)\b", ["grafikkarte", "gpu"]),
@@ -175,7 +176,7 @@ def parse_listing_id(page_url):
     return re.sub(r"\W+", "-", path.strip("/")).strip("-") or "ricardo-item"
 
 
-def build_ricardo_search_url(query, language="de", *, min_price_chf=None, max_price_chf=None):
+def build_ricardo_search_url(query, language="de", *, min_price_chf=None, max_price_chf=None, delivery_only=False):
     language = language if language in {"de", "fr", "it", "en"} else "de"
     url = f"https://www.ricardo.ch/{language}/s/{quote(clean(query) or '', safe='')}/"
     params = []
@@ -183,6 +184,8 @@ def build_ricardo_search_url(query, language="de", *, min_price_chf=None, max_pr
         params.append(("range_filters.price.max", int(max_price_chf)))
     if min_price_chf is not None:
         params.append(("range_filters.price.min", int(min_price_chf)))
+    if delivery_only:
+        params.append(("shipping", RICARDO_DELIVERY_SHIPPING_FILTER))
 
     if params:
         url = f"{url}?{urlencode(params)}"
@@ -1151,6 +1154,7 @@ def build_openclaw_search_payload(
     rejected=None,
     query_variants=None,
     search_urls=None,
+    delivery_only=False,
     enriched_count=0,
     fetch_error=None,
 ):
@@ -1166,6 +1170,7 @@ def build_openclaw_search_payload(
             "min_price_chf": min_price_chf,
             "max_price_chf": max_price_chf,
             "max_budget_chf": max_price_chf,
+            "delivery_only": bool(delivery_only),
             "search_url": search_url,
             "query_variants": query_variants or [query],
             "search_urls": search_urls or [search_url],
@@ -1191,6 +1196,7 @@ def fetch_ricardo_search(
     result_limit=DEFAULT_SEARCH_RESULT_LIMIT,
     scan_limit=DEFAULT_SEARCH_SCAN_LIMIT,
     enrich_limit=DEFAULT_SEARCH_ENRICH_LIMIT,
+    delivery_only=False,
     save=True,
 ):
     query_variants = build_ricardo_search_queries(query)
@@ -1198,7 +1204,12 @@ def fetch_ricardo_search(
         raise RuntimeError("Could not build German Ricardo search terms for this request")
 
     search_urls = [
-        build_ricardo_search_url(search_query, min_price_chf=min_price_chf, max_price_chf=max_price_chf)
+        build_ricardo_search_url(
+            search_query,
+            min_price_chf=min_price_chf,
+            max_price_chf=max_price_chf,
+            delivery_only=delivery_only,
+        )
         for search_query in query_variants
     ]
     search_url = search_urls[0]
@@ -1321,6 +1332,7 @@ def fetch_ricardo_search(
         rejected=rejected,
         query_variants=query_variants,
         search_urls=search_urls,
+        delivery_only=delivery_only,
         enriched_count=enriched_count,
         fetch_error="all_search_pages_failed" if fetched_search_pages == 0 else None,
     )
@@ -1347,6 +1359,7 @@ def parse_ricardo_search(
     result_limit=DEFAULT_SEARCH_RESULT_LIMIT,
     scan_limit=DEFAULT_SEARCH_SCAN_LIMIT,
     enrich_limit=DEFAULT_SEARCH_ENRICH_LIMIT,
+    delivery_only=False,
     save=True,
 ):
     _, payload, _ = fetch_ricardo_search(
@@ -1360,6 +1373,7 @@ def parse_ricardo_search(
         result_limit=result_limit,
         scan_limit=scan_limit,
         enrich_limit=enrich_limit,
+        delivery_only=delivery_only,
         save=save,
     )
     return payload

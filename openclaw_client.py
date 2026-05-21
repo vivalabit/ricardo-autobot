@@ -16,6 +16,7 @@ DEFAULT_OPENCLAW_TIMEOUT_SECONDS = 600
 DEFAULT_TRANSCRIPT_WAIT_SECONDS = 12
 TRANSCRIPT_POLL_INTERVAL_SECONDS = 0.5
 TELEGRAM_MESSAGE_LIMIT = 3900
+RICARDO_DELIVERY_SHIPPING_FILTER = "shipping_cost,free"
 
 
 def build_agent_message(payload, user_text, check_argument, response_language):
@@ -46,7 +47,16 @@ def build_agent_message(payload, user_text, check_argument, response_language):
     )
 
 
-def build_find_payload(item_query, budget_chf=None, *, min_price_chf=None, max_price_chf=None, candidates=None, rejected=None):
+def build_find_payload(
+    item_query,
+    budget_chf=None,
+    *,
+    min_price_chf=None,
+    max_price_chf=None,
+    delivery_only=False,
+    candidates=None,
+    rejected=None,
+):
     search_url = f"https://www.ricardo.ch/de/s/{quote(item_query.strip(), safe='')}/"
     resolved_max_price = max_price_chf if max_price_chf is not None else budget_chf
     params = []
@@ -54,6 +64,8 @@ def build_find_payload(item_query, budget_chf=None, *, min_price_chf=None, max_p
         params.append(("range_filters.price.max", int(resolved_max_price)))
     if min_price_chf is not None:
         params.append(("range_filters.price.min", int(min_price_chf)))
+    if delivery_only:
+        params.append(("shipping", RICARDO_DELIVERY_SHIPPING_FILTER))
     if params:
         search_url = f"{search_url}?{urlencode(params)}"
 
@@ -69,6 +81,7 @@ def build_find_payload(item_query, budget_chf=None, *, min_price_chf=None, max_p
             "min_price_chf": min_price_chf,
             "max_price_chf": resolved_max_price,
             "max_budget_chf": resolved_max_price,
+            "delivery_only": bool(delivery_only),
             "search_url": search_url,
             "result_count": len(candidates or []),
         },
@@ -90,6 +103,7 @@ def build_find_agent_message(item_query, budget_chf=None, user_text="", response
         "min_price_chf": search.get("min_price_chf"),
         "max_price_chf": search.get("max_price_chf"),
         "max_budget_chf": search.get("max_budget_chf") or budget_chf,
+        "delivery_only": bool(search.get("delivery_only")),
         "ricardo_search_url": search.get("search_url") or f"https://www.ricardo.ch/de/s/{quote(item_query.strip(), safe='')}/",
         "ricardo_search_urls": search.get("search_urls") or [],
         "query_variants": search.get("query_variants") or [],

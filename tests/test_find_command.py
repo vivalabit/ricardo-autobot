@@ -84,6 +84,30 @@ class FindCommandTest(unittest.TestCase):
             {"item_query": "monitor", "budget_chf": 500, "min_price_chf": None, "max_price_chf": 500},
         )
 
+    def test_parses_delivery_only_filter(self):
+        self.assertEqual(
+            parse_find_argument("dyson до 300 франков только доставка"),
+            {
+                "item_query": "dyson",
+                "budget_chf": 300,
+                "min_price_chf": None,
+                "max_price_chf": 300,
+                "delivery_only": True,
+            },
+        )
+
+    def test_parses_delivery_only_filter_before_item(self):
+        self.assertEqual(
+            parse_find_argument("только с доставкой dyson"),
+            {
+                "item_query": "dyson",
+                "budget_chf": None,
+                "min_price_chf": None,
+                "max_price_chf": None,
+                "delivery_only": True,
+            },
+        )
+
     def test_parses_find_command_with_bot_username(self):
         self.assertTrue(is_find_command("/find@ricardo_resale_bot iphone 13 400 CHF"))
         self.assertEqual(extract_find_argument("/find@ricardo_resale_bot iphone 13 400 CHF"), "iphone 13 400 CHF")
@@ -135,6 +159,15 @@ class FindCommandTest(unittest.TestCase):
             "https://www.ricardo.ch/de/s/grafikkarte/?range_filters.price.max=450&range_filters.price.min=300",
         )
 
+    def test_find_payload_contains_delivery_filter_search_url(self):
+        payload = build_find_payload("dyson", delivery_only=True)
+
+        self.assertEqual(
+            payload["search"]["search_url"],
+            "https://www.ricardo.ch/de/s/dyson/?shipping=shipping_cost%2Cfree",
+        )
+        self.assertTrue(payload["search"]["delivery_only"])
+
     def test_parser_search_url_matches_find_payload_url(self):
         self.assertEqual(build_ricardo_search_url("RTX 4070"), "https://www.ricardo.ch/de/s/RTX%204070/")
 
@@ -142,6 +175,12 @@ class FindCommandTest(unittest.TestCase):
         self.assertEqual(
             build_ricardo_search_url("grafikkarte", min_price_chf=300, max_price_chf=450),
             "https://www.ricardo.ch/de/s/grafikkarte/?range_filters.price.max=450&range_filters.price.min=300",
+        )
+
+    def test_parser_search_url_includes_delivery_filter(self):
+        self.assertEqual(
+            build_ricardo_search_url("dyson", delivery_only=True),
+            "https://www.ricardo.ch/de/s/dyson/?shipping=shipping_cost%2Cfree",
         )
 
     def test_builds_translated_search_queries_for_russian_item(self):
