@@ -3,6 +3,7 @@ import unittest
 from bot import (
     extract_find_argument,
     extract_question_argument,
+    filter_unique_find_payload,
     is_find_command,
     is_question_command,
     parse_find_argument,
@@ -111,6 +112,66 @@ class FindCommandTest(unittest.TestCase):
     def test_parses_find_command_with_bot_username(self):
         self.assertTrue(is_find_command("/find@ricardo_resale_bot iphone 13 400 CHF"))
         self.assertEqual(extract_find_argument("/find@ricardo_resale_bot iphone 13 400 CHF"), "iphone 13 400 CHF")
+
+    def test_parses_unique_find_flag(self):
+        self.assertEqual(
+            parse_find_argument("-u RTX 4070 500 CHF"),
+            {
+                "item_query": "RTX 4070",
+                "budget_chf": 500,
+                "min_price_chf": None,
+                "max_price_chf": 500,
+                "unique_only": True,
+            },
+        )
+
+    def test_parses_unique_find_flag_with_delivery_filter(self):
+        self.assertEqual(
+            parse_find_argument("-u dyson только доставка"),
+            {
+                "item_query": "dyson",
+                "budget_chf": None,
+                "min_price_chf": None,
+                "max_price_chf": None,
+                "delivery_only": True,
+                "unique_only": True,
+            },
+        )
+
+    def test_unique_find_filter_excludes_previous_candidates(self):
+        payload = {
+            "search": {"query": "RTX 4070", "result_count": 3},
+            "candidates": [
+                {"listing_id": "111", "url": "https://www.ricardo.ch/de/a/one-111/"},
+                {"listing_id": "222", "url": "https://www.ricardo.ch/de/a/two-222/"},
+                {"listing_id": "333", "url": "https://www.ricardo.ch/de/a/three-333/"},
+            ],
+            "rejected": [],
+        }
+        history = [
+            {
+                "query": "grafikkarte",
+                "listing_ids": ["222"],
+                "urls": ["https://www.ricardo.ch/de/a/old-999/"],
+            },
+            {
+                "query": "gpu",
+                "listing_ids": [],
+                "urls": ["https://www.ricardo.ch/de/a/three-333/"],
+            },
+        ]
+
+        filtered = filter_unique_find_payload(payload, history)
+
+        self.assertEqual([candidate["listing_id"] for candidate in filtered["candidates"]], ["111"])
+        self.assertEqual(filtered["search"]["result_count"], 1)
+        self.assertTrue(filtered["search"]["unique_only"])
+        self.assertEqual(filtered["search"]["pre_unique_result_count"], 3)
+        self.assertEqual(filtered["search"]["excluded_previous_result_count"], 2)
+        self.assertEqual(
+            [rejected["reason"] for rejected in filtered["rejected"]],
+            ["already_seen_in_previous_searches", "already_seen_in_previous_searches"],
+        )
 
     def test_parses_question_command_with_bot_username(self):
         self.assertTrue(is_question_command("/question@ricardo_resale_bot Is it risky?"))

@@ -19,12 +19,14 @@ from openclaw_client import (
 from settings import (
     LANGUAGE_LABELS,
     default_response_language,
+    get_chat_find_history,
     get_chat_recent_context,
     get_chat_language,
     language_label,
     load_env_file,
     normalize_language,
     set_chat_recent_context,
+    set_chat_find_history,
     set_chat_language,
     supported_language_text,
 )
@@ -55,6 +57,7 @@ FIND_DELIVERY_ONLY_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+FIND_UNIQUE_FLAGS = {"-u", "--unique"}
 LANGUAGE_COMMAND_RE = re.compile(r"^\s*/(?:lang|language)(?:@\w+)?(?:\s+(.*))?$", re.IGNORECASE)
 HELP_COMMAND_RE = re.compile(r"^\s*/(?:start|help)(?:@\w+)?\s*$", re.IGNORECASE)
 SETTINGS_COMMAND_RE = re.compile(r"^\s*/settings(?:@\w+)?\s*$", re.IGNORECASE)
@@ -116,8 +119,31 @@ def parse_budget_amount(value):
     return int(round(amount))
 
 
+def extract_find_unique_flag(argument):
+    parts = re.split(r"\s+", (argument or "").strip())
+    if not parts or parts == [""]:
+        return "", False
+
+    unique_only = False
+    remaining = []
+    for part in parts:
+        if part.lower() in FIND_UNIQUE_FLAGS and not unique_only:
+            unique_only = True
+            continue
+        remaining.append(part)
+
+    return " ".join(remaining).strip(), unique_only
+
+
+def attach_find_flags(request, *, unique_only=False):
+    if unique_only:
+        request["unique_only"] = True
+    return request
+
+
 def parse_find_argument(argument):
-    cleaned = re.sub(r"\s+", " ", (argument or "").strip())
+    cleaned, unique_only = extract_find_unique_flag(argument)
+    cleaned = re.sub(r"\s+", " ", cleaned)
     if not cleaned:
         return None
 
@@ -150,7 +176,7 @@ def parse_find_argument(argument):
             }
             if delivery_only:
                 request["delivery_only"] = True
-            return request
+            return attach_find_flags(request, unique_only=unique_only)
 
     budget_match = None
     for match in FIND_BUDGET_RE.finditer(cleaned):
@@ -176,7 +202,7 @@ def parse_find_argument(argument):
             }
             if delivery_only:
                 request["delivery_only"] = True
-            return request
+            return attach_find_flags(request, unique_only=unique_only)
 
     item_query = cleaned
 
@@ -188,7 +214,7 @@ def parse_find_argument(argument):
     }
     if delivery_only:
         request["delivery_only"] = True
-    return request
+    return attach_find_flags(request, unique_only=unique_only)
 
 
 def is_language_command(text):
@@ -355,6 +381,7 @@ def help_text(chat_id):
             "Commands:",
             "/check <ricardo_lot_link> [min_profit=30] [max_price=180]",
             "/find <item> [price_or_range] [только доставка]",
+            "/find -u <item> [price_or_range] - only new listings not seen in previous searches",
             "/question <question>",
             "/language - choose answer language",
             "/settings - show current settings",
@@ -394,6 +421,7 @@ def settings_text(chat_id):
             "Change language with the buttons below or /language <code>.",
             "Run checks with /check <ricardo_lot_link> [min_profit=30] [max_price=180].",
             "Find items with /find <item> [price_or_range], for example /find видеокарту до 500 франков.",
+            "Use /find -u <item> to hide listings already shown in previous searches.",
             "Ask follow-up questions with /question <question>.",
         ]
     )
@@ -415,9 +443,11 @@ def find_usage_text():
         [
             "Use:",
             "/find <item> [price_or_range]",
+            "/find -u <item> [price_or_range]  (only new listings)",
             "",
             "Examples:",
             "/find Видеокарта для игр",
+            "/find -u Видеокарта для игр",
             "/find видеокарту до 500 франков",
             "/find Видеокарта для игр 350-500 франков",
             "/find dyson только доставка",
@@ -480,6 +510,118 @@ def remember_chat_context(chat_id, kind, user_text, payload):
         set_chat_recent_context(chat_id, context)
     except Exception:
         logging.warning("Failed to save recent chat context: chat_id=%s kind=%s", chat_id, kind, exc_info=True)
+
+
+def find_candidate_refs(candidate):
+    if not isinstance(candidate, dict):
+        return None, None
+
+    listing_id = str(candidate.get("listing_id") or "").strip() or None
+    url = str(candidate.get("url") or "").strip() or None
+    return listing_id, url
+
+
+def find_history_seen_refs(history):
+    seen_listing_ids = set()
+    seen_urls = set()
+    for entry in history or []:
+        if not isinstance(entry, dict):
+            continue
+
+        for listing_id in entry.get("listing_ids") or []:
+            listing_id = str(listing_id or "").strip()
+            if listing_id:
+                seen_listing_ids.add(listing_id)
+
+        for url in entry.get("urls") or []:
+            url = str(url or "").strip()
+            if url:
+                seen_urls.add(url)
+
+    return seen_listing_ids, seen_urls
+
+
+def collect_find_candidate_refs(candidates):
+    listing_ids = []
+    urls = []
+    seen_listing_ids = set()
+    seen_urls = set()
+
+    for candidate in candidates or []:
+        listing_id, url = find_candidate_refs(candidate)
+        if listing_id and listing_id not in seen_listing_ids:
+            seen_listing_ids.add(listing_id)
+            listing_ids.append(listing_id)
+        if url and url not in seen_urls:
+            seen_urls.add(url)
+            urls.append(url)
+
+    return listing_ids, urls
+
+
+def filter_unique_find_payload(payload, history):
+    if not isinstance(payload, dict):
+        return payload
+
+    candidates = payload.get("candidates")
+    candidates = candidates if isinstance(candidates, list) else []
+    seen_listing_ids, seen_urls = find_history_seen_refs(history)
+    filtered_candidates = []
+    excluded_candidates = []
+
+    for candidate in candidates:
+        listing_id, url = find_candidate_refs(candidate)
+        if (listing_id and listing_id in seen_listing_ids) or (url and url in seen_urls):
+            excluded_candidates.append(candidate)
+            continue
+        filtered_candidates.append(candidate)
+
+    rejected = list(payload.get("rejected") or [])
+    for candidate in excluded_candidates[:10]:
+        listing_id, url = find_candidate_refs(candidate)
+        rejected.append(
+            {
+                "url": url,
+                "listing_id": listing_id,
+                "reason": "already_seen_in_previous_searches",
+            }
+        )
+
+    search = dict(payload.get("search") or {})
+    search["unique_only"] = True
+    search["previous_search_count"] = len(history or [])
+    search["pre_unique_result_count"] = len(candidates)
+    search["excluded_previous_result_count"] = len(excluded_candidates)
+    search["result_count"] = len(filtered_candidates)
+
+    return {
+        **payload,
+        "search": search,
+        "candidates": filtered_candidates,
+        "rejected": rejected,
+    }
+
+
+def remember_find_history(chat_id, item_query, user_text, payload):
+    candidates = payload.get("candidates") if isinstance(payload, dict) else []
+    listing_ids, urls = collect_find_candidate_refs(candidates)
+    if not listing_ids and not urls:
+        return
+
+    entry = {
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "query": item_query,
+        "telegram_message": user_text,
+        "listing_ids": listing_ids,
+        "urls": urls,
+    }
+
+    try:
+        history = get_chat_find_history(chat_id)
+        history.append(entry)
+        set_chat_find_history(chat_id, history)
+    except Exception:
+        logging.warning("Failed to save find history: chat_id=%s query=%s", chat_id, item_query, exc_info=True)
 
 
 def handle_message(token, message):
@@ -602,6 +744,7 @@ def handle_message(token, message):
         min_price_chf = find_request.get("min_price_chf")
         max_price_chf = find_request.get("max_price_chf")
         delivery_only = bool(find_request.get("delivery_only"))
+        unique_only = bool(find_request.get("unique_only"))
 
         send_chat_action(token, chat_id)
         progress_message = send_message(token, chat_id, find_progress_text("searching"), message_id)
@@ -626,6 +769,10 @@ def handle_message(token, message):
             )
             return
 
+        if unique_only:
+            payload = filter_unique_find_payload(payload, get_chat_find_history(chat_id))
+
+        remember_find_history(chat_id, item_query, text, payload)
         remember_chat_context(chat_id, "search", text, payload)
 
         send_chat_action(token, chat_id)

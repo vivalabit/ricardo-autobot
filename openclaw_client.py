@@ -110,6 +110,10 @@ def build_find_agent_message(item_query, budget_chf=None, user_text="", response
         "parser_result_count": search.get("result_count"),
         "parser_scanned_listing_count": search.get("scanned_listing_count"),
         "parser_fetch_error": search.get("fetch_error"),
+        "unique_only": bool(search.get("unique_only")),
+        "previous_search_count": search.get("previous_search_count"),
+        "pre_unique_result_count": search.get("pre_unique_result_count"),
+        "excluded_previous_result_count": search.get("excluded_previous_result_count"),
         "current_date": date.today().isoformat(),
         "response_language": language_name,
     }
@@ -123,6 +127,7 @@ def build_find_agent_message(item_query, budget_chf=None, user_text="", response
             f"Return only the final Telegram-ready answer in {language_name}. Do not return JSON.",
             "Select the best 5-8 candidates when available, each with title, price, direct Ricardo.ch URL, and a short reason why it fits.",
             "If min_price_chf or max_price_chf is present, treat it as the user's intended price range. If no price is present, choose broadly interesting deals.",
+            "If unique_only is true, candidates were already filtered against this chat's previous /find searches; present them as new results. If none remain, say no new parser-verified active Ricardo listings were found.",
             "Prefer gaming-relevant cards for gaming requests, and avoid candidates with risk_flags unless they are the only options.",
             "For auctions, mention that the current price may rise.",
             "If fetch_error is present or the candidates list is empty, say that no parser-verified active Ricardo listings were found and suggest better German search terms.",

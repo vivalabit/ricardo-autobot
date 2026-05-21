@@ -9,6 +9,7 @@ from urllib.parse import quote
 ROOT_DIR = Path(__file__).resolve().parent
 SETTINGS_PATH = ROOT_DIR / "data" / "bot_settings.json"
 DEFAULT_RESPONSE_LANGUAGE = "en"
+MAX_FIND_HISTORY_ENTRIES = 100
 
 LANGUAGE_LABELS = {
     "en": "English",
@@ -166,4 +167,20 @@ def set_chat_recent_context(chat_id, context):
     chats = settings.setdefault("chats", {})
     chat_settings = chats.setdefault(str(chat_id), {})
     chat_settings["recent_context"] = context
+    save_bot_settings(settings)
+
+
+def get_chat_find_history(chat_id):
+    settings = load_bot_settings()
+    chat_settings = (settings.get("chats") or {}).get(str(chat_id)) or {}
+    history = chat_settings.get("find_history")
+    return history if isinstance(history, list) else []
+
+
+def set_chat_find_history(chat_id, history):
+    history = history if isinstance(history, list) else []
+    settings = load_bot_settings()
+    chats = settings.setdefault("chats", {})
+    chat_settings = chats.setdefault(str(chat_id), {})
+    chat_settings["find_history"] = history[-MAX_FIND_HISTORY_ENTRIES:]
     save_bot_settings(settings)
